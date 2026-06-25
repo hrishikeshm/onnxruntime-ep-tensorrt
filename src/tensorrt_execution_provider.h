@@ -43,7 +43,7 @@ class TensorrtLogger : public nvinfer1::ILogger {
   }
 
   void log(Severity severity, const char* msg) noexcept override {
-    if (severity <= verbosity_) {
+    if (severity <= verbosity_ && severity <= Severity::kERROR) {
       time_t rawtime = std::time(0);
       struct tm stm;
 #ifdef _MSC_VER
@@ -55,25 +55,16 @@ class TensorrtLogger : public nvinfer1::ILogger {
       strftime(&buf[0], 256,
                "%Y-%m-%d %H:%M:%S",
                &stm);
-      const char* sevstr = (severity == Severity::kINTERNAL_ERROR ? "    BUG" : severity == Severity::kERROR ? "  ERROR"
-                                                                            : severity == Severity::kWARNING ? "WARNING"
-                                                                            : severity == Severity::kINFO    ? "   INFO"
-                                                                                                             : "UNKNOWN");
-      OrtLoggingLevel ort_severity;
-      if (severity <= Severity::kERROR) {
-        ort_severity = ORT_LOGGING_LEVEL_ERROR;
-      } else {
-        ort_severity = ORT_LOGGING_LEVEL_WARNING;
-      }
-
+      const char* sevstr = (severity == Severity::kINTERNAL_ERROR ? "    BUG" : "  ERROR");
       std::string message = "[" + std::string(buf) + " " + std::string(sevstr) + "] " + std::string(msg);
 
       if (ort_default_logger_ && ort_api_) {
         Ort::ThrowOnError(ort_api_->Logger_LogMessage(ort_default_logger_,
-                                                      ort_severity,
+                                                      ORT_LOGGING_LEVEL_ERROR,
                                                       message.c_str(), ORT_FILE, __LINE__, __FUNCTION__));
       }
     }
+    // WARNING-level TRT logs are redundant/noisy — suppressed.
   }
   void set_level(Severity verbosity) {
     verbosity_ = verbosity;
@@ -141,6 +132,7 @@ struct TensorrtComputeState {
   bool dla_enable = false;
   int dla_core = 0;
   size_t dla_mem_pool_limit = 4ULL << 30;
+  bool dla_static_io_buffers = false;
   bool dla_gpu_fallback_enable = false;
   std::string trt_node_name_with_precision;
   bool engine_cache_enable = false;
@@ -193,6 +185,7 @@ struct TensorrtComputeStateForEPContext {
   std::mutex* tensorrt_mu_ptr = nullptr;
   bool sync_stream_after_enqueue = true;
   bool dla_enable = false;
+  bool dla_static_io_buffers = false;
 };
 
 using ShapeRangesMap = std::unordered_map<std::string, std::unordered_map<size_t, std::vector<std::vector<int64_t>>>>;
@@ -346,6 +339,7 @@ struct TensorrtExecutionProvider : public OrtEp, public ApiPtrs {
   bool dla_enable_ = false;
   int dla_core_ = 0;
   size_t dla_mem_pool_limit_ = 4ULL << 30;
+  bool dla_static_io_buffers_ = false;
   bool dla_gpu_fallback_enable_ = false;
   bool dla_enable_uint8_asymmetric_quantization_ = false;
   bool dla_adjust_for_dla_ = false;

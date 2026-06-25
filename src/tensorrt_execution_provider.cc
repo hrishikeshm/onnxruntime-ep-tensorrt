@@ -542,7 +542,8 @@ OrtStatusPtr BindContextInput(Ort::KernelContext& ctx,
                               std::unordered_map<std::string, std::vector<int64_t>>& shape_tensor_values_int64,
                               std::vector<AllocatorUniquePtr<void>>& scratch_buffers,
                               OrtAllocator* alloc,
-                              cudaStream_t stream) {
+                              cudaStream_t stream,
+                              bool dla_enable) {
   try {
     auto input_tensor = ctx.GetInput(input_index);
     auto tensor_info = input_tensor.GetTensorTypeAndShapeInfo();
@@ -648,7 +649,15 @@ OrtStatusPtr BindContextInput(Ort::KernelContext& ctx,
           return g_ort_api->CreateStatus(ORT_EP_FAIL, std::string("TensorRT EP input onnx tensor data type: " + std::to_string(tensor_type) + " not supported.").c_str());
         }
       }
-      trt_context->setTensorAddress(input_name, data);
+      if (dla_enable) {
+        const void* prev_ptr = trt_context->getTensorAddress(input_name);
+        if (prev_ptr != data) {
+          if (prev_ptr != nullptr) trt_context->setTensorAddress(input_name, nullptr);
+          trt_context->setTensorAddress(input_name, data);
+        }
+      } else {
+        trt_context->setTensorAddress(input_name, data);
+      }
     }
   } catch (const Ort::Exception& e) {
     return g_ort_api->CreateStatus(ORT_EP_FAIL, e.what());
@@ -667,7 +676,8 @@ OrtStatusPtr BindContextOutput(Ort::KernelContext& ctx,
                                DDSOutputAllocatorMap& dds_output_allocator_map,
                                std::vector<AllocatorUniquePtr<void>>& scratch_buffers,
                                OrtAllocator* alloc,
-                               std::unordered_map<char const*, void*>& buffers) {
+                               std::unordered_map<char const*, void*>& buffers,
+                               bool dla_enable) {
   // Get output shape
   nvinfer1::Dims dims = trt_context->getTensorShape(output_name);
   int nb_dims = dims.nbDims;
@@ -721,7 +731,15 @@ OrtStatusPtr BindContextOutput(Ort::KernelContext& ctx,
           return g_ort_api->CreateStatus(ORT_EP_FAIL, std::string("TensorRT EP output tensor data type: " + std::to_string(output_type) + " not supported.").c_str());
         }
       }
-      trt_context->setTensorAddress(output_name, buffers[output_name]);
+      if (dla_enable) {
+        const void* prev_ptr = trt_context->getTensorAddress(output_name);
+        if (prev_ptr != buffers[output_name]) {
+          if (prev_ptr != nullptr) trt_context->setTensorAddress(output_name, nullptr);
+          trt_context->setTensorAddress(output_name, buffers[output_name]);
+        }
+      } else {
+        trt_context->setTensorAddress(output_name, buffers[output_name]);
+      }
     } catch (const Ort::Exception& e) {
       return g_ort_api->CreateStatus(ORT_EP_FAIL, e.what());
     }
@@ -2180,6 +2198,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
       dla_enable_,
       dla_core_,
       dla_mem_pool_limit_,
+      dla_static_io_buffers_,
       dla_gpu_fallback_enable_,
       trt_node_name_with_precision,
       engine_cache_enable_,
@@ -2346,7 +2365,8 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromPrecompiledEngine
       &context_memory_,
       &tensorrt_mu_,
       sync_stream_after_enqueue_,
-      dla_enable_};
+      dla_enable_,
+      dla_static_io_buffers_};
 
   ep->compute_states_for_ep_context_[fused_node_name] = std::move(compute_state);
 
@@ -2813,6 +2833,7 @@ TensorrtExecutionProvider::TensorrtExecutionProvider(TensorrtExecutionProviderFa
       dla_enable_ = info_.dla_enable;
       dla_core_ = info_.dla_core;
       dla_mem_pool_limit_ = info_.dla_mem_pool_limit;
+      dla_static_io_buffers_ = info_.dla_static_io_buffers;
       dla_gpu_fallback_enable_ = info_.dla_gpu_fallback_enable;
       dla_enable_uint8_asymmetric_quantization_ = info_.dla_enable_uint8_asymmetric_quantization;
       dla_adjust_for_dla_ = info_.dla_adjust_for_dla;
@@ -3725,7 +3746,7 @@ OrtStatus* TRTEpNodeComputeInfo::ComputeImpl(OrtNodeComputeInfo* this_ptr, void*
     const auto tensor_shapes = tensor_info.GetShape();
 
     auto status = BindContextInput(ctx, trt_engine, trt_context, input_name, input_index, shape_tensor_values,
-                                   shape_tensor_values_int64, scratch_buffers, alloc, stream);
+                                   shape_tensor_values_int64, scratch_buffers, alloc, stream, trt_state->dla_enable);
     if (status != nullptr) {
       return ep.ort_api.CreateStatus(ORT_EP_FAIL, "BindContextInput failed.");
     }
@@ -3758,7 +3779,8 @@ OrtStatus* TRTEpNodeComputeInfo::ComputeImpl(OrtNodeComputeInfo* this_ptr, void*
     }
 
     auto status = BindContextOutput(ctx, trt_context, output_name, output_index, output_type, i, output_tensors,
-                                    output_dim_sizes, dds_output_allocator_map, scratch_buffers, alloc, buffers);
+                                    output_dim_sizes, dds_output_allocator_map, scratch_buffers, alloc, buffers,
+                                    trt_state->dla_enable);
     if (status != nullptr) {
       return ep.ort_api.CreateStatus(ORT_EP_FAIL, "BindContextOutput failed.");
     }
@@ -3867,12 +3889,15 @@ OrtStatus* TRTEpNodeComputeInfo::ComputeImpl(OrtNodeComputeInfo* this_ptr, void*
   // Unregister DLA tensor addresses so cuDLA releases its cudlaMemRegister
   // hold on ORT's pooled buffers before the allocator recycles the VA.
   // setTensorAddress(nullptr) must precede any cudaFree on these pointers.
-  if (trt_state->dla_enable) {
-    for (size_t i = 0, end = output_binding_names.size(); i < end; ++i) {
-      trt_context->setTensorAddress(output_binding_names[i], nullptr);
+  // Skip when dla_static_io_buffers is set — caller guarantees addresses are stable across runs.
+  if (trt_state->dla_enable && !trt_state->dla_static_io_buffers) {
+    for (auto name : input_binding_names) {
+      if (trt_context->getTensorAddress(name) != nullptr)
+        trt_context->setTensorAddress(name, nullptr);
     }
-    for (size_t i = 0, end = input_binding_names.size(); i < end; ++i) {
-      trt_context->setTensorAddress(input_binding_names[i], nullptr);
+    for (auto name : output_binding_names) {
+      if (trt_context->getTensorAddress(name) != nullptr)
+        trt_context->setTensorAddress(name, nullptr);
     }
   }
 
@@ -4023,7 +4048,7 @@ OrtStatus* TRTEpEpContextNodeComputeInfo::ComputeImpl(OrtNodeComputeInfo* this_p
     const auto tensor_shapes = tensor_info.GetShape();
 
     auto status = BindContextInput(ctx, trt_engine, trt_context, input_name, input_index, shape_tensor_values,
-                                   shape_tensor_values_int64, scratch_buffers, alloc, stream);
+                                   shape_tensor_values_int64, scratch_buffers, alloc, stream, trt_state->dla_enable);
     if (status != nullptr) {
       return ep.ort_api.CreateStatus(ORT_EP_FAIL, "BindContextInput failed.");
     }
@@ -4056,7 +4081,8 @@ OrtStatus* TRTEpEpContextNodeComputeInfo::ComputeImpl(OrtNodeComputeInfo* this_p
     }
 
     auto status = BindContextOutput(ctx, trt_context, output_name, output_index, output_type, i, output_tensors,
-                                    output_dim_sizes, dds_output_allocator_map, scratch_buffers, alloc, buffers);
+                                    output_dim_sizes, dds_output_allocator_map, scratch_buffers, alloc, buffers,
+                                    trt_state->dla_enable);
     if (status != nullptr) {
       return ep.ort_api.CreateStatus(ORT_EP_FAIL, "BindContextOutput failed.");
     }
@@ -4165,12 +4191,15 @@ OrtStatus* TRTEpEpContextNodeComputeInfo::ComputeImpl(OrtNodeComputeInfo* this_p
   // Unregister DLA tensor addresses so cuDLA releases its cudlaMemRegister
   // hold on ORT's pooled buffers before the allocator recycles the VA.
   // setTensorAddress(nullptr) must precede any cudaFree on these pointers.
-  if (trt_state->dla_enable) {
-    for (size_t i = 0, end = output_binding_names.size(); i < end; ++i) {
-      trt_context->setTensorAddress(output_binding_names[i], nullptr);
+  // Skip when dla_static_io_buffers is set — caller guarantees addresses are stable across runs.
+  if (trt_state->dla_enable && !trt_state->dla_static_io_buffers) {
+    for (auto name : input_binding_names) {
+      if (trt_context->getTensorAddress(name) != nullptr)
+        trt_context->setTensorAddress(name, nullptr);
     }
-    for (size_t i = 0, end = input_binding_names.size(); i < end; ++i) {
-      trt_context->setTensorAddress(input_binding_names[i], nullptr);
+    for (auto name : output_binding_names) {
+      if (trt_context->getTensorAddress(name) != nullptr)
+        trt_context->setTensorAddress(name, nullptr);
     }
   }
 

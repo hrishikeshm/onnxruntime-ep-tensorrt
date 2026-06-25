@@ -25,6 +25,7 @@ constexpr const char* kInt8UseNativeCalibTable = "trt_int8_use_native_calibratio
 constexpr const char* kDLAEnable = "trt_dla_enable";
 constexpr const char* kDLACore = "trt_dla_core";
 constexpr const char* kDLAMemPoolLimit = "trt_dla_mem_pool_limit";
+constexpr const char* kDLAStaticIoBuffers = "trt_dla_static_io_buffers";
 constexpr const char* kDLAGpuFallbackEnable = "trt_dla_gpu_fallback_enable";
 constexpr const char* kDLAEnableUint8AsymmetricQuantization = "trt_dla_enable_uint8_asymmetric_quantization";
 constexpr const char* kDLAAdjustForDLA = "trt_dla_adjust_for_dla";
@@ -107,6 +108,7 @@ TensorrtExecutionProviderInfo TensorrtExecutionProviderInfo::FromProviderOptions
           .AddAssignmentToReference(tensorrt::provider_option_names::kDLAEnable, info.dla_enable)
           .AddAssignmentToReference(tensorrt::provider_option_names::kDLACore, info.dla_core)
           .AddAssignmentToReference(tensorrt::provider_option_names::kDLAMemPoolLimit, info.dla_mem_pool_limit)
+          .AddAssignmentToReference(tensorrt::provider_option_names::kDLAStaticIoBuffers, info.dla_static_io_buffers)
           .AddAssignmentToReference(tensorrt::provider_option_names::kDLAGpuFallbackEnable, info.dla_gpu_fallback_enable)
           .AddAssignmentToReference(tensorrt::provider_option_names::kDLAEnableUint8AsymmetricQuantization, info.dla_enable_uint8_asymmetric_quantization)
           .AddAssignmentToReference(tensorrt::provider_option_names::kDLAAdjustForDLA, info.dla_adjust_for_dla)
