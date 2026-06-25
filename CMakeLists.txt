@@ -134,6 +134,20 @@ set(protobuf_BUILD_TESTS OFF CACHE INTERNAL "Disable tests")
 set(protobuf_MSVC_STATIC_RUNTIME OFF CACHE INTERNAL "Force build static runtime")
 FetchContent_MakeAvailable(protobuf)
 
+# Cross-compilation shim: protoc must run on the host arch at build time.
+# When cross-compiling (e.g. x64 host → ARM64 target), FetchContent builds
+# protoc for the target arch, which can't execute on the host. Pass
+# -DPROTOC_EXECUTABLE=<path-to-host-protoc> to inject a pre-built host-arch
+# binary as the protobuf::protoc imported target and set
+# -Dprotobuf_BUILD_PROTOC_BINARIES=OFF to skip building the target-arch one.
+if(DEFINED PROTOC_EXECUTABLE AND NOT TARGET protobuf::protoc)
+  add_executable(protobuf::protoc IMPORTED GLOBAL)
+  set_target_properties(protobuf::protoc PROPERTIES
+    IMPORTED_LOCATION "${PROTOC_EXECUTABLE}"
+  )
+  message(STATUS "Using pre-built protoc at ${PROTOC_EXECUTABLE}")
+endif()
+
 # Add ONNX
 FetchContent_Declare(
   onnx
