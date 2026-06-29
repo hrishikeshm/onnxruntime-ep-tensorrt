@@ -880,6 +880,32 @@ nvonnxparser::OnnxParserFlags TensorrtExecutionProvider::ComputeParserFlags() co
   return parser_flags;
 }
 
+OrtStatus* TensorrtExecutionProvider::ApplyDlaTransforms(std::string& model_bytes) const {
+#ifndef USE_DLA_TRANSFORMS
+  static_cast<void>(model_bytes);
+  return ort_api.CreateStatus(ORT_EP_FAIL,
+                              "[TensorRT EP] ApplyDlaTransforms called but USE_DLA_TRANSFORMS not compiled");
+#else
+  using namespace dla_transforms;
+  DLATransforms transforms;
+
+  if (transforms.LoadSerializedModel(model_bytes) != TransformStatus::SUCCESS)
+    return ort_api.CreateStatus(ORT_EP_FAIL, "[TensorRT EP] DLA LoadSerializedModel failed");
+
+  if (transforms.ApplyTransforms() != TransformStatus::SUCCESS)
+    return ort_api.CreateStatus(ORT_EP_FAIL, "[TensorRT EP] DLA ApplyTransforms failed");
+
+  if (transforms.ModelShapeInference() != TransformStatus::SUCCESS)
+    return ort_api.CreateStatus(ORT_EP_FAIL, "[TensorRT EP] DLA ModelShapeInference failed");
+
+  if (transforms.ModelCheck() != TransformStatus::SUCCESS)
+    return ort_api.CreateStatus(ORT_EP_FAIL, "[TensorRT EP] DLA ModelCheck failed");
+
+  model_bytes = transforms.GetSerializedModel();
+  return nullptr;
+#endif
+}
+
 SubGraphCollection_t TensorrtExecutionProvider::GetSupportedList(SubGraphCollection_t nodes_vector_input,
                                                                  int iterations, const int max_iterations,
                                                                  const OrtGraph* graph, bool* early_termination) const {
@@ -959,6 +985,21 @@ SubGraphCollection_t TensorrtExecutionProvider::GetSupportedList(SubGraphCollect
           model_proto.SerializeToOstream(&dump);
         }
 
+        // Apply DLA graph transforms before TRT capability check.
+        std::string check_buf = string_buf;
+#ifdef USE_DLA_TRANSFORMS
+        bool dla_transforms_applied = false;
+        if (dla_transform_enable_) {
+          dla_transforms::DLATransforms transforms;
+          if (transforms.LoadSerializedModel(string_buf) == dla_transforms::TransformStatus::SUCCESS &&
+              transforms.ApplyTransforms()               == dla_transforms::TransformStatus::SUCCESS &&
+              transforms.ModelShapeInference()           == dla_transforms::TransformStatus::SUCCESS) {
+            check_buf = transforms.GetSerializedModel();
+            dla_transforms_applied = true;
+          }
+        }
+#endif
+
         // Get supported node list recursively
         SubGraphCollection_t parser_nodes_list;
         TensorrtLogger& trt_logger = GetTensorrtLogger(detailed_build_log_, logger_, &ort_api);
@@ -979,7 +1020,7 @@ SubGraphCollection_t TensorrtExecutionProvider::GetSupportedList(SubGraphCollect
         bool is_model_supported = false;
 
 #if (NV_TENSORRT_MAJOR == 10 && NV_TENSORRT_MINOR > 1) || NV_TENSORRT_MAJOR > 10
-        is_model_supported = trt_parser->supportsModelV2(string_buf.data(), string_buf.size(), model_path_);
+        is_model_supported = trt_parser->supportsModelV2(check_buf.data(), check_buf.size(), model_path_);
 
         // Note: Calling getNbSubgraphs or getSubgraphNodes before calling supportsModelV2 results in undefined
         // behavior.
@@ -997,7 +1038,7 @@ SubGraphCollection_t TensorrtExecutionProvider::GetSupportedList(SubGraphCollect
           parser_nodes_list.back().second = is_model_supported ? true : false;
         }
 #else
-        trt_parser->supportsModel(string_buf.data(), string_buf.size(), parser_nodes_list, model_path_);
+        trt_parser->supportsModel(check_buf.data(), check_buf.size(), parser_nodes_list, model_path_);
 #endif  // (NV_TENSORRT_MAJOR == 10 && NV_TENSORRT_MINOR > 1) || NV_TENSORRT_MAJOR > 10
 
         // Sort the nodes in priority-based topological order
@@ -1009,6 +1050,25 @@ SubGraphCollection_t TensorrtExecutionProvider::GetSupportedList(SubGraphCollect
             },
             PriorityNodeCompare()));
         ENFORCE(status.IsOK());
+
+#ifdef USE_DLA_TRANSFORMS
+        if (dla_transforms_applied) {
+          if (!is_model_supported) {
+            // TODO : Add support for the case where a transformed model is not fully supported by TRT
+            // Needs special handling to map nodes from transformed model space back to the original model space
+            THROW("[TensorRT EP] DLA transforms were applied but the model is not fully supported by TRT. "
+                  "Partial DLA support is not handled.");
+          }
+          // Rebuild parser_nodes_list with N-space positional indices.
+          // supportsModelV2 was called on the transformed (M-space) model, so
+          // getSubgraphNodes returns M-space indices which don't correspond to
+          // sub_graph_topo_sorted_nodes (N-space order). Replace with a single
+          // fully-supported group covering all original nodes.
+          std::vector<size_t> all_n_indices(sub_graph_topo_sorted_nodes.size());
+          std::iota(all_n_indices.begin(), all_n_indices.end(), 0);
+          parser_nodes_list = {{all_n_indices, true}};
+        }
+#endif
 
         // This is the mapping table that stores the "node id to sub_graph's index" pair.
         // It's used for locating the node index in original `group.first` given a node id.
@@ -1340,6 +1400,12 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
 
   std::string string_buf;
   model_proto.SerializeToString(&string_buf);
+
+#ifdef USE_DLA_TRANSFORMS
+  if (dla_transform_enable_) {
+    RETURN_IF_ERROR(ApplyDlaTransforms(string_buf));
+  }
+#endif
 
   if (dump_subgraphs_) {
     // Dump TensorRT subgraphs
@@ -1841,7 +1907,8 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
   // Name the engine cache based on GPU compute capacity and reduce the chance of loading an incompatible cache
   // Note: Engine cache generated on a GPU with large memory might not be loadable on a GPU with smaller memory, even if
   // they share the same compute capacity
-  const std::string cache_path_prefix = cache_path + cache_hw_compat;
+  const std::string cache_path_prefix = cache_path + cache_hw_compat +
+                                        (dla_transform_enable_ ? "_dlatransform" : "");
   std::string engine_cache_path = cache_path_prefix + ".engine";
   const std::string encrypted_engine_cache_path = engine_cache_path + ".encrypted";
   const std::string profile_cache_path = cache_path_prefix + ".profile";
@@ -2200,6 +2267,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
       dla_mem_pool_limit_,
       dla_static_io_buffers_,
       dla_gpu_fallback_enable_,
+      dla_transform_enable_,
       trt_node_name_with_precision,
       engine_cache_enable_,
       cache_path_,
@@ -2837,6 +2905,7 @@ TensorrtExecutionProvider::TensorrtExecutionProvider(TensorrtExecutionProviderFa
       dla_gpu_fallback_enable_ = info_.dla_gpu_fallback_enable;
       dla_enable_uint8_asymmetric_quantization_ = info_.dla_enable_uint8_asymmetric_quantization;
       dla_adjust_for_dla_ = info_.dla_adjust_for_dla;
+      dla_transform_enable_ = info_.dla_transform_enable;
     }
     dump_subgraphs_ = info_.dump_subgraphs;
     engine_cache_enable_ = info_.engine_cache_enable;
@@ -3258,7 +3327,8 @@ OrtStatus* TRTEpNodeComputeInfo::ComputeImpl(OrtNodeComputeInfo* this_ptr, void*
   // Name the engine cache based on GPU compute capacity and reduce the chance of loading an incompatible cache
   // Note: Engine cache generated on a GPU with large memory might not be loadable on a GPU with smaller memory, even
   // if they share the same compute capacity
-  const std::string cache_path_prefix = cache_path + cache_hw_compat;
+  const std::string cache_path_prefix = cache_path + cache_hw_compat +
+                                        (trt_state->dla_transform_enable ? "_dlatransform" : "");
   std::string engine_cache_path = cache_path_prefix + ".engine";
   const std::string encrypted_engine_cache_path = engine_cache_path + ".encrypted";
   const std::string profile_cache_path = cache_path_prefix + ".profile";

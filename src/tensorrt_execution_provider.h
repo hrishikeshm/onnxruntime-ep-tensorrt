@@ -6,6 +6,10 @@
 #include "nv_includes.h"
 #include "cuda_graph.h"
 
+#ifdef USE_DLA_TRANSFORMS
+#include "dla_transforms.h"
+#endif
+
 #include <ctime>
 #include <string>
 #include <unordered_set>
@@ -134,6 +138,7 @@ struct TensorrtComputeState {
   size_t dla_mem_pool_limit = 4ULL << 30;
   bool dla_static_io_buffers = false;
   bool dla_gpu_fallback_enable = false;
+  bool dla_transform_enable = false;
   std::string trt_node_name_with_precision;
   bool engine_cache_enable = false;
   std::string engine_cache_path;
@@ -343,6 +348,7 @@ struct TensorrtExecutionProvider : public OrtEp, public ApiPtrs {
   bool dla_gpu_fallback_enable_ = false;
   bool dla_enable_uint8_asymmetric_quantization_ = false;
   bool dla_adjust_for_dla_ = false;
+  bool dla_transform_enable_ = false;
   bool force_sequential_engine_build_ = false;
   std::string int8_calibration_cache_name_;
   bool int8_calibration_cache_available_ = false;
@@ -433,6 +439,8 @@ struct TensorrtExecutionProvider : public OrtEp, public ApiPtrs {
 
   /**Check whether all the nodes of subgraph are supported*/
   bool IsSubGraphFullySupported(const OrtGraph* graph, SubGraphCollection_t supported_nodes_vector) const;
+
+  OrtStatus* ApplyDlaTransforms(std::string& model_bytes) const;
 };
 
 /// <summary>

@@ -279,6 +279,21 @@ if(onnxruntime_ep_tensorrt_BUILD_TESTS)
   )
 endif()
 
+option(onnxruntime_ep_tensorrt_DLA_TRANSFORMS "Enable DLA graph transforms" OFF)
+
+if(onnxruntime_ep_tensorrt_DLA_TRANSFORMS)
+  if(NOT DEFINED DLA_TRANSFORMS_ROOT)
+    message(FATAL_ERROR "DLA_TRANSFORMS_ROOT must be set when onnxruntime_ep_tensorrt_DLA_TRANSFORMS is ON")
+  endif()
+  target_compile_definitions(onnxruntime_ep_tensorrt PRIVATE USE_DLA_TRANSFORMS)
+  target_include_directories(onnxruntime_ep_tensorrt PRIVATE "${DLA_TRANSFORMS_ROOT}/include")
+  if(WIN32)
+    target_link_libraries(onnxruntime_ep_tensorrt PRIVATE "${DLA_TRANSFORMS_ROOT}/lib/dla_transforms.lib")
+  else()
+    target_link_libraries(onnxruntime_ep_tensorrt PRIVATE "${DLA_TRANSFORMS_ROOT}/lib/libdla_transforms.so")
+  endif()
+endif()
+
 if(onnxruntime_ep_tensorrt_INSTALL)
   # Installation target
   include(GNUInstallDirs)
