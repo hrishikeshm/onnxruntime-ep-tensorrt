@@ -47,7 +47,7 @@ class TensorrtLogger : public nvinfer1::ILogger {
   }
 
   void log(Severity severity, const char* msg) noexcept override {
-    if (severity <= verbosity_ && severity <= Severity::kERROR) {
+    if (severity <= verbosity_) {
       time_t rawtime = std::time(0);
       struct tm stm;
 #ifdef _MSC_VER
@@ -59,16 +59,25 @@ class TensorrtLogger : public nvinfer1::ILogger {
       strftime(&buf[0], 256,
                "%Y-%m-%d %H:%M:%S",
                &stm);
-      const char* sevstr = (severity == Severity::kINTERNAL_ERROR ? "    BUG" : "  ERROR");
+      const char* sevstr = (severity == Severity::kINTERNAL_ERROR ? "    BUG" : severity == Severity::kERROR ? "  ERROR"
+                                                                              : severity == Severity::kWARNING ? "WARNING"
+                                                                              : severity == Severity::kINFO    ? "   INFO"
+                                                                                                               : "UNKNOWN");
+      OrtLoggingLevel ort_severity;
+      if (severity <= Severity::kERROR) {
+        ort_severity = ORT_LOGGING_LEVEL_ERROR;
+      } else {
+        ort_severity = ORT_LOGGING_LEVEL_WARNING;
+      }
+
       std::string message = "[" + std::string(buf) + " " + std::string(sevstr) + "] " + std::string(msg);
 
       if (ort_default_logger_ && ort_api_) {
         Ort::ThrowOnError(ort_api_->Logger_LogMessage(ort_default_logger_,
-                                                      ORT_LOGGING_LEVEL_ERROR,
+                                                      ort_severity,
                                                       message.c_str(), ORT_FILE, __LINE__, __FUNCTION__));
       }
     }
-    // WARNING-level TRT logs are redundant/noisy — suppressed.
   }
   void set_level(Severity verbosity) {
     verbosity_ = verbosity;

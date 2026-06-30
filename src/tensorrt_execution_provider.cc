@@ -533,6 +533,21 @@ OrtStatusPtr ApplyProfileShapesFromInputTensorValue(std::vector<nvinfer1::IOptim
     break;                                                                                                                                        \
   }
 
+// For DLA, TRT asserts that the current address is cleared to nullptr before a new
+// address is set on the same slot. Skip the rebind entirely if the address hasn't changed.
+static void SetTensorAddressDla(nvinfer1::IExecutionContext* ctx, const char* name,
+                                void* data, bool dla_enable) {
+  if (dla_enable) {
+    const void* prev = ctx->getTensorAddress(name);
+    if (prev != data) {
+      if (prev != nullptr) ctx->setTensorAddress(name, nullptr);
+      ctx->setTensorAddress(name, data);
+    }
+  } else {
+    ctx->setTensorAddress(name, data);
+  }
+}
+
 OrtStatusPtr BindContextInput(Ort::KernelContext& ctx,
                               nvinfer1::ICudaEngine* trt_engine,
                               nvinfer1::IExecutionContext* trt_context,
@@ -649,15 +664,7 @@ OrtStatusPtr BindContextInput(Ort::KernelContext& ctx,
           return g_ort_api->CreateStatus(ORT_EP_FAIL, std::string("TensorRT EP input onnx tensor data type: " + std::to_string(tensor_type) + " not supported.").c_str());
         }
       }
-      if (dla_enable) {
-        const void* prev_ptr = trt_context->getTensorAddress(input_name);
-        if (prev_ptr != data) {
-          if (prev_ptr != nullptr) trt_context->setTensorAddress(input_name, nullptr);
-          trt_context->setTensorAddress(input_name, data);
-        }
-      } else {
-        trt_context->setTensorAddress(input_name, data);
-      }
+      SetTensorAddressDla(trt_context, input_name, data, dla_enable);
     }
   } catch (const Ort::Exception& e) {
     return g_ort_api->CreateStatus(ORT_EP_FAIL, e.what());
@@ -731,15 +738,7 @@ OrtStatusPtr BindContextOutput(Ort::KernelContext& ctx,
           return g_ort_api->CreateStatus(ORT_EP_FAIL, std::string("TensorRT EP output tensor data type: " + std::to_string(output_type) + " not supported.").c_str());
         }
       }
-      if (dla_enable) {
-        const void* prev_ptr = trt_context->getTensorAddress(output_name);
-        if (prev_ptr != buffers[output_name]) {
-          if (prev_ptr != nullptr) trt_context->setTensorAddress(output_name, nullptr);
-          trt_context->setTensorAddress(output_name, buffers[output_name]);
-        }
-      } else {
-        trt_context->setTensorAddress(output_name, buffers[output_name]);
-      }
+      SetTensorAddressDla(trt_context, output_name, buffers[output_name], dla_enable);
     } catch (const Ort::Exception& e) {
       return g_ort_api->CreateStatus(ORT_EP_FAIL, e.what());
     }
@@ -1206,7 +1205,11 @@ OrtStatus* ORT_API_CALL TensorrtExecutionProvider::GetCapabilityImpl(OrtEp* this
   int min_subgraph_size = 1;
 
   bool early_termination = false;
-  supported_nodes_vector = ep->GetSupportedList(parser_nodes_vector, 0, max_partition_iterations, graph, &early_termination);
+  try {
+    supported_nodes_vector = ep->GetSupportedList(parser_nodes_vector, 0, max_partition_iterations, graph, &early_termination);
+  } catch (const std::exception& e) {
+    return ort_api.CreateStatus(ORT_EP_FAIL, e.what());
+  }
   if (early_termination) {
     supported_nodes_vector.clear();
   }
@@ -1269,7 +1272,11 @@ OrtStatus* ORT_API_CALL TensorrtExecutionProvider::GetCapabilityImpl(OrtEp* this
           bool subgraph_early_termination = false;
 
           // Another subgraph of "If" control flow has not yet been parsed by GetCapability.
-          subgraph_supported_nodes_vector = ep->GetSupportedList(parser_subgraph_nodes_vector, 0, ep->max_partition_iterations_, subgraph, &subgraph_early_termination);
+          try {
+            subgraph_supported_nodes_vector = ep->GetSupportedList(parser_subgraph_nodes_vector, 0, ep->max_partition_iterations_, subgraph, &subgraph_early_termination);
+          } catch (const std::exception& e) {
+            return ort_api.CreateStatus(ORT_EP_FAIL, e.what());
+          }
           all_subgraphs_are_supported = ep->IsSubGraphFullySupported(subgraph, subgraph_supported_nodes_vector);
           break;
         }

@@ -279,19 +279,23 @@ if(onnxruntime_ep_tensorrt_BUILD_TESTS)
   )
 endif()
 
-option(onnxruntime_ep_tensorrt_DLA_TRANSFORMS "Enable DLA graph transforms" OFF)
+# DLA graph transform support is Windows-only for now: the transforms library is
+# distributed as a static .lib (per MSFT request) and has not been validated on Linux.
+option(onnxruntime_ep_tensorrt_DLA_TRANSFORMS "Enable DLA graph transforms (Windows only)" OFF)
 
 if(onnxruntime_ep_tensorrt_DLA_TRANSFORMS)
+  if(NOT WIN32)
+    message(FATAL_ERROR
+      "onnxruntime_ep_tensorrt_DLA_TRANSFORMS=ON is only supported on Windows. "
+      "The DLA transforms library ships as a static .lib (per MSFT request) "
+      "and has not been validated on Linux.")
+  endif()
   if(NOT DEFINED DLA_TRANSFORMS_ROOT)
     message(FATAL_ERROR "DLA_TRANSFORMS_ROOT must be set when onnxruntime_ep_tensorrt_DLA_TRANSFORMS is ON")
   endif()
   target_compile_definitions(onnxruntime_ep_tensorrt PRIVATE USE_DLA_TRANSFORMS)
   target_include_directories(onnxruntime_ep_tensorrt PRIVATE "${DLA_TRANSFORMS_ROOT}/include")
-  if(WIN32)
-    target_link_libraries(onnxruntime_ep_tensorrt PRIVATE "${DLA_TRANSFORMS_ROOT}/lib/dla_transforms.lib")
-  else()
-    target_link_libraries(onnxruntime_ep_tensorrt PRIVATE "${DLA_TRANSFORMS_ROOT}/lib/libdla_transforms.so")
-  endif()
+  target_link_libraries(onnxruntime_ep_tensorrt PRIVATE "${DLA_TRANSFORMS_ROOT}/lib/dla_transforms.lib")
 endif()
 
 if(onnxruntime_ep_tensorrt_INSTALL)
