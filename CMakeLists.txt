@@ -241,17 +241,22 @@ if(onnxruntime_ep_tensorrt_BUILD_TESTS)
   FetchContent_MakeAvailable(googletest)
 
   add_executable(trt_ep_tests
+    tests/test_main.cc
     tests/cuda_graph_test.cc
     tests/tensorrt_basic_test.cc
+    tests/tensorrt_ep_dla_options_test.cc
   )
   target_compile_definitions(trt_ep_tests PRIVATE
     -DONNX_NAMESPACE=onnx
     -DONNX_ML
     -DNOMINMAX
+    -DORT_API_MANUAL_INIT
+    -DEP_LIB_PATH="$<TARGET_FILE:onnxruntime_ep_tensorrt>"
   )
   target_include_directories(trt_ep_tests PRIVATE
     "$<BUILD_INTERFACE:${ORT_INCLUDE_DIR}>"
     "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/src>"
+    "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/tests>"
     "$<BUILD_INTERFACE:${CUDAToolkit_INCLUDE_DIRS}>"
   )
   target_link_libraries(trt_ep_tests PRIVATE
@@ -259,7 +264,15 @@ if(onnxruntime_ep_tensorrt_BUILD_TESTS)
     CUDA::cudart
     onnx
     protobuf::libprotobuf
-    GTest::gtest_main
+    GTest::gtest
+  )
+
+  # Copy the EP DLL next to the test binary so resolve_ep_lib() finds it first.
+  add_custom_command(TARGET trt_ep_tests POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "$<TARGET_FILE:onnxruntime_ep_tensorrt>"
+      "$<TARGET_FILE_DIR:trt_ep_tests>/"
+    COMMENT "Copying EP library next to test binary"
   )
 
   # Copy testdata to the build directory so tests can find it
@@ -296,6 +309,19 @@ if(onnxruntime_ep_tensorrt_DLA_TRANSFORMS)
   target_compile_definitions(onnxruntime_ep_tensorrt PRIVATE USE_DLA_TRANSFORMS)
   target_include_directories(onnxruntime_ep_tensorrt PRIVATE "${DLA_TRANSFORMS_ROOT}/include")
   target_link_libraries(onnxruntime_ep_tensorrt PRIVATE "${DLA_TRANSFORMS_ROOT}/lib/dla_transforms.lib")
+
+  if(onnxruntime_ep_tensorrt_BUILD_TESTS)
+    target_sources(trt_ep_tests PRIVATE tests/tensorrt_ep_dla_transforms_test.cc)
+    target_compile_definitions(trt_ep_tests PRIVATE USE_DLA_TRANSFORMS)
+    target_include_directories(trt_ep_tests PRIVATE "${DLA_TRANSFORMS_ROOT}/include")
+    # Copy dla_transforms.dll next to the test binary so resolve_dla_transforms_dll() finds it.
+    add_custom_command(TARGET trt_ep_tests POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${DLA_TRANSFORMS_ROOT}/bin/dla_transforms.dll"
+        "$<TARGET_FILE_DIR:trt_ep_tests>/"
+      COMMENT "Copying dla_transforms.dll next to test binary"
+    )
+  endif()
 endif()
 
 if(onnxruntime_ep_tensorrt_INSTALL)
