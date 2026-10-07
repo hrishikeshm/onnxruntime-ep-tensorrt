@@ -20,7 +20,7 @@ bool IsAbsolutePath(const std::string& path_string) {
     return false;
   }
 
-  std::filesystem::path path(path_string);
+  const auto path = std::filesystem::u8path(path_string);
   return path.is_absolute();
 }
 
@@ -28,7 +28,7 @@ bool IsRelativePathToParentPath(const std::string& path_string) {
   if (path_string.empty())
     return false;
 
-  std::filesystem::path path(path_string);
+  auto path = std::filesystem::u8path(path_string);
 
   // Normalize things like "a/../b" or "foo//bar/.."
   path = path.lexically_normal();
@@ -49,8 +49,8 @@ std::filesystem::path GetPathOrParentPathOfCtxModel(const std::string& ep_contex
   if (ep_context_file_path.empty()) {
     return std::filesystem::path();
   }
-  std::filesystem::path ctx_path(ep_context_file_path);
-  if (std::filesystem::is_directory(ep_context_file_path)) {
+  const auto ctx_path = std::filesystem::u8path(ep_context_file_path);
+  if (std::filesystem::is_directory(ctx_path)) {
     return ctx_path;
   } else {
     return ctx_path.parent_path();
@@ -59,7 +59,7 @@ std::filesystem::path GetPathOrParentPathOfCtxModel(const std::string& ep_contex
 
 bool IsWeightStrippedEngineCache(std::filesystem::path& engine_cache_path) {
   // The weight-stripped engine cache has the naming of xxx.stripped.engine
-  return engine_cache_path.stem().extension().string() == ".stripped";
+  return engine_cache_path.stem().extension().u8string() == ".stripped";
 }
 
 /*
@@ -129,7 +129,7 @@ OrtStatus* EPContextNodeHelper::CreateEPContextNode(const std::string& engine_ca
 
   RETURN_IF_ERROR(ort_api.CreateOpAttr("hardware_architecture", compute_capability.c_str(), compute_capability.size(),
                                       ORT_OP_ATTR_STRING, &attributes[2]));
-  const std::string onnx_model_filename = std::filesystem::path(onnx_model_path).filename().string();
+  const std::string onnx_model_filename = std::filesystem::u8path(onnx_model_path).filename().u8string();
   RETURN_IF_ERROR(ort_api.CreateOpAttr("onnx_model_filename", onnx_model_filename.c_str(), onnx_model_filename.size(),
                                       ORT_OP_ATTR_STRING, &attributes[3]));
 
@@ -319,9 +319,9 @@ OrtStatus* EPContextNodeReader::GetEpContextFromGraph(const OrtGraph& graph) {
     const auto ctx_model_dir = model_path.empty()
                                   ? GetPathOrParentPathOfCtxModel(ep_context_model_path_)
                                   : std::filesystem::path(model_path).parent_path();
-    auto engine_cache_path = ctx_model_dir / cache_path;
+    auto engine_cache_path = ctx_model_dir / std::filesystem::u8path(cache_path);
 
-    std::string message = "[TensorRT EP] GetEpContextFromGraph engine_cache_path: " + engine_cache_path.string();
+    std::string message = "[TensorRT EP] GetEpContextFromGraph engine_cache_path: " + engine_cache_path.u8string();
     Ort::ThrowOnError(ort_api.Logger_LogMessage(&logger_,
                                                 OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE,
                                                 message.c_str(), ORT_FILE, __LINE__, __FUNCTION__));
@@ -333,41 +333,41 @@ OrtStatus* EPContextNodeReader::GetEpContextFromGraph(const OrtGraph& graph) {
 
     // If the serialized refitted engine is present, use it directly without refitting the engine again
     if (weight_stripped_engine_refit_) {
-      const std::filesystem::path refitted_engine_cache_path = GetWeightRefittedEnginePath(engine_cache_path.string());
+      const auto refitted_engine_cache_path = std::filesystem::u8path(GetWeightRefittedEnginePath(engine_cache_path.u8string()));
       if (std::filesystem::exists(refitted_engine_cache_path)) {
-        std::string message = "[TensorRT EP] " + refitted_engine_cache_path.string() + " exists.";
+        std::string message = "[TensorRT EP] " + refitted_engine_cache_path.u8string() + " exists.";
         Ort::ThrowOnError(ort_api.Logger_LogMessage(&logger_,
                                                     OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE,
                                                     message.c_str(), ORT_FILE, __LINE__, __FUNCTION__));
-        engine_cache_path = refitted_engine_cache_path.string();
+        engine_cache_path = refitted_engine_cache_path;
         weight_stripped_engine_refit_ = false;
       }
     }
 
     if (!std::filesystem::exists(engine_cache_path)) {
       std::string error_msg =
-          "TensorRT EP can't find engine cache: " + engine_cache_path.string() +
+          "TensorRT EP can't find engine cache: " + engine_cache_path.u8string() +
           ". Please make sure engine cache is in the same directory or sub-directory of context model.";
       return ort_api.CreateStatus(ORT_EP_FAIL, error_msg.c_str());
     }
 
-    std::ifstream engine_file(engine_cache_path.string(), std::ios::binary | std::ios::in);
-    RETURN_IF_NOT(engine_file.is_open(), "Cannot open EPContext engine cache: ", engine_cache_path.string());
+    std::ifstream engine_file(engine_cache_path, std::ios::binary | std::ios::in);
+    RETURN_IF_NOT(engine_file.is_open(), "Cannot open EPContext engine cache: ", engine_cache_path.u8string());
     engine_file.seekg(0, std::ios::end);
     const auto file_size = engine_file.tellg();
-    RETURN_IF_NOT(file_size > 0, "EPContext engine cache is empty or unreadable: ", engine_cache_path.string());
+    RETURN_IF_NOT(file_size > 0, "EPContext engine cache is empty or unreadable: ", engine_cache_path.u8string());
     const size_t engine_size = static_cast<size_t>(file_size);
     engine_file.seekg(0, std::ios::beg);
     std::unique_ptr<char[]> engine_buf{new char[engine_size]};
     RETURN_IF_NOT(engine_file.read(engine_buf.get(), static_cast<std::streamsize>(engine_size)),
-                  "Cannot read EPContext engine cache: ", engine_cache_path.string());
+                  "Cannot read EPContext engine cache: ", engine_cache_path.u8string());
     *(trt_engine_) = std::unique_ptr<nvinfer1::ICudaEngine>(trt_runtime_->deserializeCudaEngine(engine_buf.get(), engine_size));
     if (!(*trt_engine_)) {
-      std::string error_msg = "TensorRT EP could not deserialize engine from cache: " + engine_cache_path.string();
+      std::string error_msg = "TensorRT EP could not deserialize engine from cache: " + engine_cache_path.u8string();
       return ort_api.CreateStatus(ORT_EP_FAIL, error_msg.c_str());
     }
 
-    message = "[TensorRT EP] DeSerialized " + engine_cache_path.string();
+    message = "[TensorRT EP] DeSerialized " + engine_cache_path.u8string();
     Ort::ThrowOnError(ort_api.Logger_LogMessage(&logger_,
                                                 OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE,
                                                 message.c_str(), ORT_FILE, __LINE__, __FUNCTION__));
@@ -377,7 +377,7 @@ OrtStatus* EPContextNodeReader::GetEpContextFromGraph(const OrtGraph& graph) {
       RETURN_IF_NOT(node_attr.GetType() == OrtOpAttrType::ORT_OP_ATTR_STRING, "\'onnx_model_filename\' attribute should be string type.");
       std::string onnx_model_filename;
       RETURN_IF_ERROR(node_attr.GetValue<std::string>(onnx_model_filename));
-      std::string weight_stripped_engine_cache = engine_cache_path.string();
+      std::string weight_stripped_engine_cache = engine_cache_path.u8string();
       auto status = ep_.RefitEngine(onnx_model_filename,
                                     onnx_model_folder_path_,
                                     weight_stripped_engine_cache,
@@ -409,8 +409,8 @@ OrtStatus* EPContextNodeReader::GetEpContextFromGraph(const OrtGraph& graph) {
  * The cache name of weight-refitted engine is TensorrtExecutionProvider_TRTKernel_XXXXX.engine
  */
 std::string GetWeightRefittedEnginePath(std::string stripped_engine_cache) {
-  std::filesystem::path stripped_engine_cache_path(stripped_engine_cache);
-  std::string refitted_engine_cache_path = stripped_engine_cache_path.stem().stem().string() + ".engine";
+  const auto stripped_engine_cache_path = std::filesystem::u8path(stripped_engine_cache);
+  std::string refitted_engine_cache_path = stripped_engine_cache_path.stem().stem().u8string() + ".engine";
   return refitted_engine_cache_path;
 }
 }  // namespace trt_ep

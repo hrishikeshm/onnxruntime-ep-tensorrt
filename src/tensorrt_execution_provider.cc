@@ -1048,7 +1048,7 @@ OrtStatus* ORT_API_CALL TensorrtExecutionProvider::GetDefaultMemoryDeviceImpl(
 #endif
 
 OrtStatus* ORT_API_CALL TensorrtExecutionProvider::GetCapabilityImpl(OrtEp* this_ptr, const OrtGraph* graph,
-                                                                     OrtEpGraphSupportInfo* graph_support_info) noexcept {
+                                                                     OrtEpGraphSupportInfo* graph_support_info) noexcept try {
   TensorrtExecutionProvider* ep = static_cast<TensorrtExecutionProvider*>(this_ptr);
   const OrtApi& ort_api = ep->ort_api;
 
@@ -1064,10 +1064,12 @@ OrtStatus* ORT_API_CALL TensorrtExecutionProvider::GetCapabilityImpl(OrtEp* this
     context_path.replace_filename(context_path.stem().native() + ORT_TSTR("_ctx.onnx"));
     ep->ep_context_file_path_ = PathToUTF8String(context_path.native());
     if (ep->engine_cache_enable_) {
-      ep->cache_path_ = (context_path.parent_path() / ep->engine_cache_relative_path_to_context_model_dir_).string();
+      const auto cache_directory = context_path.parent_path() /
+                                   std::filesystem::u8path(ep->engine_cache_relative_path_to_context_model_dir_);
+      ep->cache_path_ = cache_directory.u8string();
       if (!ep->cache_path_.empty()) {
         std::error_code error;
-        std::filesystem::create_directories(ep->cache_path_, error);
+        std::filesystem::create_directories(cache_directory, error);
         RETURN_IF_NOT(!error, "Cannot create EPContext engine cache directory: ", error.message());
       }
     }
@@ -1329,6 +1331,15 @@ OrtStatus* ORT_API_CALL TensorrtExecutionProvider::GetCapabilityImpl(OrtEp* this
   }
 
   return nullptr;
+} catch (const Ort::Exception& error) {
+  const auto& api = static_cast<TensorrtExecutionProvider*>(this_ptr)->ort_api;
+  return api.CreateStatus(error.GetOrtErrorCode(), error.what());
+} catch (const std::exception& error) {
+  const auto& api = static_cast<TensorrtExecutionProvider*>(this_ptr)->ort_api;
+  return api.CreateStatus(ORT_EP_FAIL, error.what());
+} catch (...) {
+  const auto& api = static_cast<TensorrtExecutionProvider*>(this_ptr)->ort_api;
+  return api.CreateStatus(ORT_EP_FAIL, "Unexpected exception in TensorRT GetCapabilityImpl.");
 }
 
 OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this_ptr,
@@ -1886,7 +1897,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
 
   // If weight-stripped engine is enabled and refitted engine cache is not present,
   // TRT EP will use the engine cache with ".stripped.engine" appended to the end.
-  const std::filesystem::path engine_cache_fs_path = engine_cache_path;
+  const auto engine_cache_fs_path = std::filesystem::u8path(engine_cache_path);
   if (weight_stripped_engine_enable_ && !std::filesystem::exists(engine_cache_fs_path)) {
     engine_cache_path = cache_path_prefix + ".stripped.engine";
     weight_stripped_engine_refit_ = true;
@@ -1924,7 +1935,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
         }
       }
 
-      std::ifstream engine_file(engine_cache_path, std::ios::binary | std::ios::in);
+      std::ifstream engine_file(std::filesystem::u8path(engine_cache_path), std::ios::binary | std::ios::in);
       if (engine_cache_enable_ && !engine_decryption_enable_ && engine_file && !engine_update) {
         engine_file.seekg(0, std::ios::end);
         size_t engine_size = engine_file.tellg();
@@ -1943,7 +1954,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
         }
 
       } else if (engine_decryption_enable_ && engine_cache_enable_ &&
-                 std::filesystem::exists(encrypted_engine_cache_path) && !engine_update) {
+                 std::filesystem::exists(std::filesystem::u8path(encrypted_engine_cache_path)) && !engine_update) {
         // Decrypt engine
         size_t engine_size = 0;
         if (!engine_decryption_(encrypted_engine_cache_path.c_str(), nullptr, &engine_size)) {
@@ -2064,7 +2075,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
                                                               message.c_str(), ORT_FILE, __LINE__, __FUNCTION__));
             }
           } else {
-            std::ofstream file(engine_cache_path, std::ios::binary | std::ios::out);
+            std::ofstream file(std::filesystem::u8path(engine_cache_path), std::ios::binary | std::ios::out);
             file.write(reinterpret_cast<char*>(serialized_engine->data()), serialized_engine->size());
             std::string message = "[TensorRT EP] Serialized engine " + engine_cache_path;
             Ort::ThrowOnError(ep->ort_api.Logger_LogMessage(&ep->logger_,
@@ -2194,8 +2205,8 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
     // Keep cache subdirectories while making the reference relative to the context model.
     const std::string context_cache_ref = ep_context_embed_mode_
         ? std::string{}
-        : (std::filesystem::path(engine_cache_relative_path_to_context_model_dir_) /
-           std::filesystem::path(engine_cache_path).filename()).generic_string();
+        : (std::filesystem::u8path(engine_cache_relative_path_to_context_model_dir_) /
+           std::filesystem::u8path(engine_cache_path).filename()).generic_u8string();
     RETURN_IF_ERROR(ep_ctx_node_helper->CreateEPContextNode(context_cache_ref,
                                                            serialized_engine_pointer,
                                                            serialized_engine_size,
@@ -2427,7 +2438,7 @@ OrtStatus* ORT_API_CALL TensorrtExecutionProvider::CompileImpl(_In_ OrtEp* this_
                                                                _In_ const OrtNode** fused_nodes,
                                                                _In_ size_t count,
                                                                _Out_writes_all_(count) OrtNodeComputeInfo** node_compute_infos,
-                                                               _Out_writes_(count) OrtNode** ep_context_nodes) noexcept {
+                                                               _Out_writes_(count) OrtNode** ep_context_nodes) noexcept try {
   TensorrtExecutionProvider* ep = static_cast<TensorrtExecutionProvider*>(this_ptr);
   const OrtApi& ort_api = ep->ort_api;
 
@@ -2487,6 +2498,15 @@ OrtStatus* ORT_API_CALL TensorrtExecutionProvider::CompileImpl(_In_ OrtEp* this_
   }
 
   return nullptr;
+} catch (const Ort::Exception& error) {
+  const auto& api = static_cast<TensorrtExecutionProvider*>(this_ptr)->ort_api;
+  return api.CreateStatus(error.GetOrtErrorCode(), error.what());
+} catch (const std::exception& error) {
+  const auto& api = static_cast<TensorrtExecutionProvider*>(this_ptr)->ort_api;
+  return api.CreateStatus(ORT_EP_FAIL, error.what());
+} catch (...) {
+  const auto& api = static_cast<TensorrtExecutionProvider*>(this_ptr)->ort_api;
+  return api.CreateStatus(ORT_EP_FAIL, "Unexpected exception in TensorRT CompileImpl.");
 }
 
 const char* ORT_API_CALL TensorrtExecutionProvider::GetNameImpl(const OrtEp* this_ptr) noexcept {
@@ -2757,7 +2777,7 @@ OrtStatus* TensorrtExecutionProvider::RefitEngine(std::string onnx_model_filenam
   if (serialize_refitted_engine) {
     std::string refitted_engine_cache = GetWeightRefittedEnginePath(weight_stripped_engine_cath_path);
     nvinfer1::IHostMemory* serialized_engine = trt_engine->serialize();
-    std::ofstream engine_file(refitted_engine_cache, std::ios::binary | std::ios::out);
+    std::ofstream engine_file(std::filesystem::u8path(refitted_engine_cache), std::ios::binary | std::ios::out);
     engine_file.write(reinterpret_cast<const char*>(serialized_engine->data()), serialized_engine->size());
     std::string message = "[TensorRT EP] Serialize the refitted engine to " + refitted_engine_cache;
     Ort::ThrowOnError(ort_api.Logger_LogMessage(&logger_,
@@ -3028,8 +3048,8 @@ TensorrtExecutionProvider::TensorrtExecutionProvider(TensorrtExecutionProviderFa
   }
 
   // If ep_context_file_path_ is provided as a directory, create it if it's not existed
-  if (dump_ep_context_model_ && !ep_context_file_path_.empty() && std::filesystem::path(ep_context_file_path_).extension().empty() && !std::filesystem::is_directory(ep_context_file_path_)) {
-    if (!std::filesystem::create_directory(ep_context_file_path_)) {
+  if (dump_ep_context_model_ && !ep_context_file_path_.empty() && std::filesystem::u8path(ep_context_file_path_).extension().empty() && !std::filesystem::is_directory(std::filesystem::u8path(ep_context_file_path_))) {
+    if (!std::filesystem::create_directory(std::filesystem::u8path(ep_context_file_path_))) {
       throw std::runtime_error("Failed to create directory " + ep_context_file_path_);
     }
   }
@@ -3049,7 +3069,7 @@ TensorrtExecutionProvider::TensorrtExecutionProvider(TensorrtExecutionProviderFa
     engine_cache_relative_path_to_context_model_dir_ = cache_path_;
 
     // Make cache_path_ to be the relative path of ep_context_file_path_
-    cache_path_ = GetPathOrParentPathOfCtxModel(ep_context_file_path_).append(cache_path_).string();
+    cache_path_ = (GetPathOrParentPathOfCtxModel(ep_context_file_path_) / std::filesystem::u8path(cache_path_)).u8string();
   }
 
   // Hardware compatibility: pre-check on environment
@@ -3078,13 +3098,13 @@ TensorrtExecutionProvider::TensorrtExecutionProvider(TensorrtExecutionProviderFa
   }
 
   if (engine_cache_enable_ || int8_enable_ || timing_cache_enable_) {
-    if (!cache_path_.empty() && !fs::is_directory(cache_path_)) {
-      if (!fs::create_directory(cache_path_)) {
+    if (!cache_path_.empty() && !fs::is_directory(std::filesystem::u8path(cache_path_))) {
+      if (!fs::create_directory(std::filesystem::u8path(cache_path_))) {
         throw std::runtime_error("Failed to create directory " + cache_path_);
       }
     }
-    if (!global_cache_path_.empty() && !fs::is_directory(global_cache_path_)) {
-      if (!fs::create_directory(global_cache_path_)) {
+    if (!global_cache_path_.empty() && !fs::is_directory(std::filesystem::u8path(global_cache_path_))) {
+      if (!fs::create_directory(std::filesystem::u8path(global_cache_path_))) {
         throw std::runtime_error("Failed to create directory " + global_cache_path_);
       }
     }
@@ -3355,7 +3375,7 @@ OrtStatus* TRTEpNodeComputeInfo::ComputeImpl(OrtNodeComputeInfo* this_ptr, void*
 
   // If weight-stripped engine is enabled and refitted engine cache is not present,
   // TRT EP will use the engine cache with ".stripped.engine" appended to the end.
-  const std::filesystem::path engine_cache_fs_path = engine_cache_path;
+  const auto engine_cache_fs_path = std::filesystem::u8path(engine_cache_path);
   if (weight_stripped_engine_enable && !std::filesystem::exists(engine_cache_fs_path)) {
     engine_cache_path = cache_path_prefix + ".stripped.engine";
     weight_stripped_engine_refit = true;
@@ -3363,8 +3383,8 @@ OrtStatus* TRTEpNodeComputeInfo::ComputeImpl(OrtNodeComputeInfo* this_ptr, void*
 
   // Load serialized engine
   if (trt_state->engine_cache_enable && trt_engine == nullptr) {
-    std::ifstream engine_file(engine_cache_path, std::ios::binary | std::ios::in);
-    std::ifstream profile_file(profile_cache_path, std::ios::binary | std::ios::in);
+    std::ifstream engine_file(std::filesystem::u8path(engine_cache_path), std::ios::binary | std::ios::in);
+    std::ifstream profile_file(std::filesystem::u8path(profile_cache_path), std::ios::binary | std::ios::in);
     if (engine_file && !trt_state->engine_decryption_enable && profile_file) {
       // Deserialize profile
       shape_ranges = DeserializeProfileV2(profile_file);
@@ -3397,7 +3417,7 @@ OrtStatus* TRTEpNodeComputeInfo::ComputeImpl(OrtNodeComputeInfo* this_ptr, void*
       trt_engine = trt_state->engine->get();
       context_update = true;
 
-    } else if (trt_state->engine_decryption_enable && std::filesystem::exists(encrypted_engine_cache_path) &&
+    } else if (trt_state->engine_decryption_enable && std::filesystem::exists(std::filesystem::u8path(encrypted_engine_cache_path)) &&
                profile_file) {
       shape_ranges = DeserializeProfileV2(profile_file);
       std::string message = "[TensorRT EP] DeSerialized " + profile_cache_path;
@@ -3722,7 +3742,7 @@ OrtStatus* TRTEpNodeComputeInfo::ComputeImpl(OrtNodeComputeInfo* this_ptr, void*
                                                          message.c_str(), ORT_FILE, __LINE__, __FUNCTION__));
         }
       } else {
-        std::ofstream file(engine_cache_path, std::ios::binary | std::ios::out);
+        std::ofstream file(std::filesystem::u8path(engine_cache_path), std::ios::binary | std::ios::out);
         file.write(reinterpret_cast<char*>(serialized_engine->data()), serialized_engine->size());
         std::string message = "[TensorRT EP] Serialized " + engine_cache_path;
         Ort::ThrowOnError(ep.ort_api.Logger_LogMessage(&ep.logger_,

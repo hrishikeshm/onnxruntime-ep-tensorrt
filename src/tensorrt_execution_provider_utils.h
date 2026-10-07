@@ -423,7 +423,7 @@ nvinfer1::TacticSources GetTacticSourceFromString(std::string& tactic_string) {
 }
 
 inline std::vector<char> loadTimingCacheFile(const std::string inFileName) {
-  std::ifstream iFile(inFileName, std::ios::in | std::ios::binary);
+  std::ifstream iFile(fs::u8path(inFileName), std::ios::in | std::ios::binary);
   if (!iFile) {
     // LOGS_DEFAULT(WARNING) << "[TensorRT EP] Could not read timing cache from: " << inFileName
     //                       << ". A new timing cache will be generated and written.";
@@ -439,7 +439,7 @@ inline std::vector<char> loadTimingCacheFile(const std::string inFileName) {
 }
 
 inline void saveTimingCacheFile(const std::string outFileName, const nvinfer1::IHostMemory* blob) {
-  std::ofstream oFile(outFileName, std::ios::out | std::ios::binary);
+  std::ofstream oFile(fs::u8path(outFileName), std::ios::out | std::ios::binary);
   if (!oFile) {
     // LOGS_DEFAULT(WARNING) << "[TensorRT EP] Could not write timing cache to: " << outFileName;
     return;
@@ -478,7 +478,7 @@ float ConvertSinglePrecisionIEEE754ToFloat(unsigned long input) {
  *   ...
  */
 bool ReadDynamicRange(const std::string file_name, const bool is_trt_calibration_table, std::unordered_map<std::string, float>& dynamic_range_map) {
-  std::ifstream infile(file_name, std::ios::binary | std::ios::in);
+  std::ifstream infile(fs::u8path(file_name), std::ios::binary | std::ios::in);
   if (!infile) {
     return false;
   }
@@ -576,7 +576,7 @@ void SerializeProfile(const std::string& file_name, std::unordered_map<std::stri
   builder.Finish();
 
   // Save flexbuffer
-  std::ofstream file(file_name, std::ios::binary | std::ios::out);
+  std::ofstream file(fs::u8path(file_name), std::ios::binary | std::ios::out);
   auto buf = builder.GetBuffer();
   size_t size = builder.GetSize();
   file.write(reinterpret_cast<const char*>(&buf[0]), size);
@@ -685,7 +685,7 @@ void SerializeProfileV2(const std::string& file_name, std::unordered_map<std::st
   builder.Finish();
 
   // Save flexbuffer
-  std::ofstream file(file_name, std::ios::binary | std::ios::out);
+  std::ofstream file(fs::u8path(file_name), std::ios::binary | std::ios::out);
   auto buf = builder.GetBuffer();
   size_t size = builder.GetSize();
   file.write(reinterpret_cast<const char*>(&buf[0]), size);
@@ -789,7 +789,7 @@ bool CompareProfiles(const std::string& file_name,
                      std::unordered_map<std::string, std::vector<std::vector<int64_t>>>& profile_min_shapes,
                      std::unordered_map<std::string, std::vector<std::vector<int64_t>>>& profile_max_shapes,
                      std::unordered_map<std::string, std::vector<std::vector<int64_t>>>& profile_opt_shapes) {
-  std::ifstream profile_file(file_name, std::ios::binary | std::ios::in);
+  std::ifstream profile_file(fs::u8path(file_name), std::ios::binary | std::ios::in);
   if (!profile_file) {
     ////LOGS_DEFAULT(VERBOSE) << "[TensorRT EP] " << file_name << " doesn't exist.";
     return true;
@@ -883,9 +883,8 @@ std::string GetCachePath(const std::string& root, const std::string& name) {
   if (root.empty()) {
     return name;
   } else {
-    fs::path path = root;
-    path.append(name);
-    return path.string();
+    const auto path = fs::u8path(root) / fs::u8path(name);
+    return path.u8string();
   }
 }
 

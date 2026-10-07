@@ -40,9 +40,15 @@ bool ORT_API_CALL TRTEpDataTransfer::CanCopyImpl(const OrtDataTransferImpl* this
     return false;
   }
 
-  return (src_type == OrtMemoryInfoDeviceType_GPU && dst_type == OrtMemoryInfoDeviceType_GPU) ||
-         (src_type == OrtMemoryInfoDeviceType_GPU && dst_type == OrtMemoryInfoDeviceType_CPU) ||
-         (src_type == OrtMemoryInfoDeviceType_CPU && dst_type == OrtMemoryInfoDeviceType_GPU) ||
+  // A validated DLA endpoint does not make a foreign endpoint host-accessible.
+  const bool src_supported = src_type == OrtMemoryInfoDeviceType_CPU ||
+                             src_type == OrtMemoryInfoDeviceType_GPU || src_is_dla;
+  const bool dst_supported = dst_type == OrtMemoryInfoDeviceType_CPU ||
+                             dst_type == OrtMemoryInfoDeviceType_GPU || dst_is_dla;
+  if (!src_supported || !dst_supported) return false;
+
+  // CPU-to-CPU copies are handled by ORT's CPU transfer implementation.
+  return src_type == OrtMemoryInfoDeviceType_GPU || dst_type == OrtMemoryInfoDeviceType_GPU ||
          src_is_dla || dst_is_dla;
 }
 
@@ -67,6 +73,12 @@ OrtStatus* ORT_API_CALL TRTEpDataTransfer::CopyTensorsImpl(OrtDataTransferImpl* 
     const OrtMemoryDevice* dst_device = nullptr;
     src_device = impl.ep_api.Value_GetMemoryDevice(src_tensors[i]);
     dst_device = impl.ep_api.Value_GetMemoryDevice(dst_tensors[i]);
+
+    // Enforce the same contract even when CopyTensors is called directly.
+    if (!CanCopyImpl(this_ptr, src_device, dst_device)) {
+      return impl.ort_api.CreateStatus(ORT_INVALID_ARGUMENT,
+                                      "TensorRT EP does not support this memory-device transfer.");
+    }
 
     OrtMemoryInfoDeviceType src_device_type = impl.ep_api.MemoryDevice_GetDeviceType(src_device);
     OrtMemoryInfoDeviceType dst_device_type = impl.ep_api.MemoryDevice_GetDeviceType(dst_device);
