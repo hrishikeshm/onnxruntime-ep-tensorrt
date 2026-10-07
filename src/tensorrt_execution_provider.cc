@@ -17,6 +17,7 @@
 #include "onnx/onnx_pb.h"
 #include "cuda/unary_elementwise_ops_impl.h"
 #include "utils/ep_utils.h"
+#include "utils/path_string.h"
 #include "windows_dependency_loader.h"
 
 #ifdef _WIN32
@@ -1053,6 +1054,25 @@ OrtStatus* ORT_API_CALL TensorrtExecutionProvider::GetCapabilityImpl(OrtEp* this
 
   auto ort_graph = Ort::ConstGraph(graph);
 
+  const ORTCHAR_T* graph_model_path = nullptr;
+  RETURN_IF_ERROR(ort_api.Graph_GetModelPath(graph, &graph_model_path));
+  const auto model_path = PathToUTF8String(PathString(graph_model_path));
+  RETURN_IF_NOT(model_path.size() < sizeof(ep->model_path_), "ONNX model path is too long.");
+  std::memcpy(ep->model_path_, model_path.c_str(), model_path.size() + 1);
+  if (ep->dump_ep_context_model_ && ep->ep_context_file_path_.empty() && !model_path.empty()) {
+    auto context_path = std::filesystem::path(graph_model_path);
+    context_path.replace_filename(context_path.stem().native() + ORT_TSTR("_ctx.onnx"));
+    ep->ep_context_file_path_ = PathToUTF8String(context_path.native());
+    if (ep->engine_cache_enable_) {
+      ep->cache_path_ = (context_path.parent_path() / ep->engine_cache_relative_path_to_context_model_dir_).string();
+      if (!ep->cache_path_.empty()) {
+        std::error_code error;
+        std::filesystem::create_directories(ep->cache_path_, error);
+        RETURN_IF_NOT(!error, "Cannot create EPContext engine cache directory: ", error.message());
+      }
+    }
+  }
+
   // Sort the nodes in priority-based topological order
   std::vector<Ort::ConstNode> topo_sorted_nodes;
   RETURN_IF_ERROR(KahnsTopologicalSort(
@@ -1101,6 +1121,21 @@ OrtStatus* ORT_API_CALL TensorrtExecutionProvider::GetCapabilityImpl(OrtEp* this
      */
     const char* op_type = nullptr;
     RETURN_IF_ERROR(ep->ort_api.Node_GetOperatorType(node, &op_type));
+
+    // EPContext is not an ONNX parser operator. Fuse each owned context directly
+    // so CompileImpl deserializes it, and keep all context nodes out of parser groups.
+    if (std::strcmp(op_type, "EPContext") == 0) {
+      bool is_context_node = false;
+      RETURN_IF_ERROR(EPContextNodeReader::IsTensorRTContextNode(node, ort_api, is_context_node));
+      if (is_context_node) {
+        OrtNodeFusionOptions node_fusion_options = {};
+        node_fusion_options.ort_version_supported = ORT_API_VERSION;
+        node_fusion_options.drop_constant_initializers = true;
+        RETURN_IF_ERROR(ep->ep_api.EpGraphSupportInfo_AddNodesToFuse(graph_support_info, &node, 1, &node_fusion_options));
+      }
+      new_subgraph = true;
+      continue;
+    }
 
     if (control_flow_op_set.find(op_type) != control_flow_op_set.end()) {
       auto supported_control_flow_op = [&](const OrtNode* node) {
@@ -1151,6 +1186,8 @@ OrtStatus* ORT_API_CALL TensorrtExecutionProvider::GetCapabilityImpl(OrtEp* this
       new_subgraph = true;
     }
   }
+
+  if (parser_nodes_vector.empty()) return nullptr;
 
   // Use this local definitions for now
   // TODO: Use provider option
@@ -2129,20 +2166,11 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
     }
   }
 
-  // Save TRT engine, other TRT objects and input/output info to map
-  parsers_.emplace(fused_node_name, std::move(trt_parser));
-  engines_.emplace(fused_node_name, std::move(trt_engine));
-  contexts_.emplace(fused_node_name, std::move(trt_context));
-  networks_.emplace(fused_node_name, std::move(trt_network));
-  input_info_[fused_node_name].push_back(input_indexes);
-  output_info_[fused_node_name].push_back(output_indexes);
-  output_info_[fused_node_name].push_back(output_types);
-  input_shape_ranges_[fused_node_name] = input_implicit_shape_ranges;
-  profiles_.emplace(fused_node_name, std::move(trt_profiles));
-
-  // Create EP Context nodes
+  // Create EP Context nodes while trt_engine still owns the built/loaded engine.
+  // Transfer ownership to engines_ only after validation and serialization.
   std::unique_ptr<EPContextNodeHelper> ep_ctx_node_helper = std::make_unique<EPContextNodeHelper>(*ep, topo_sorted_graph, fused_node);
   if (dump_ep_context_model_) {
+    RETURN_IF_NOT(trt_engine != nullptr, "EPContext creation requires static shapes or explicit shape profiles.");
     std::string compute_capability_hw_compat = compute_capability_;
     if (engine_cache_enable_ && engine_hw_compatible_) {
       compute_capability_hw_compat = "80+";
@@ -2154,20 +2182,38 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
     if (serialized_engine) {
       serialized_engine_pointer = reinterpret_cast<char*>(serialized_engine->data());
       serialized_engine_size = serialized_engine->size();
-    } else if (!serialized_engine && ep_context_embed_mode_ && engine_cache_enable_) {
+    } else if (ep_context_embed_mode_) {
       serialized_engine = std::unique_ptr<nvinfer1::IHostMemory>(trt_engine->serialize());
+      RETURN_IF_NOT(serialized_engine != nullptr, "Failed to serialize EPContext engine.");
       serialized_engine_pointer = reinterpret_cast<char*>(serialized_engine->data());
       serialized_engine_size = serialized_engine->size();
     }
 
-    ep_ctx_node_helper->CreateEPContextNode(engine_cache_path,
-                                            serialized_engine_pointer,
-                                            serialized_engine_size,
-                                            ep_context_embed_mode_,
-                                            compute_capability_hw_compat,
-                                            model_path_,
-                                            ep_context_node);
+    // Keep cache subdirectories while making the reference relative to the context model.
+    const std::string context_cache_ref = ep_context_embed_mode_
+        ? std::string{}
+        : (std::filesystem::path(engine_cache_relative_path_to_context_model_dir_) /
+           std::filesystem::path(engine_cache_path).filename()).generic_string();
+    RETURN_IF_ERROR(ep_ctx_node_helper->CreateEPContextNode(context_cache_ref,
+                                                           serialized_engine_pointer,
+                                                           serialized_engine_size,
+                                                           ep_context_embed_mode_,
+                                                           compute_capability_hw_compat,
+                                                           model_path_,
+                                                           getInferLibVersion(),
+                                                           ep_context_node));
   }
+
+  // Save TRT engine, other TRT objects and input/output info to map
+  parsers_.emplace(fused_node_name, std::move(trt_parser));
+  engines_.emplace(fused_node_name, std::move(trt_engine));
+  contexts_.emplace(fused_node_name, std::move(trt_context));
+  networks_.emplace(fused_node_name, std::move(trt_network));
+  input_info_[fused_node_name].push_back(input_indexes);
+  output_info_[fused_node_name].push_back(output_indexes);
+  output_info_[fused_node_name].push_back(output_types);
+  input_shape_ranges_[fused_node_name] = input_implicit_shape_ranges;
+  profiles_.emplace(fused_node_name, std::move(trt_profiles));
 
   std::unique_ptr<TensorrtComputeState> compute_state = std::make_unique<TensorrtComputeState>();
 
@@ -2265,7 +2311,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromPrecompiledEngine
                                                                                                       logger_,
                                                                                                       &trt_engine,
                                                                                                       runtime_.get(),
-                                                                                                      model_path_,
+                                                                                                      ep_context_file_path_,
                                                                                                       compute_capability_,
                                                                                                       weight_stripped_engine_enable_,
                                                                                                       onnx_model_folder_path_,
@@ -2425,8 +2471,9 @@ OrtStatus* ORT_API_CALL TensorrtExecutionProvider::CompileImpl(_In_ OrtEp* this_
       output_map.emplace(name, i);
     }
 
-    OrtStatus* status;
-    if (EPContextNodeReader::GraphHasCtxNode(graphs[fused_node_idx], ort_api)) {
+    bool has_context_node = false;
+    RETURN_IF_ERROR(EPContextNodeReader::GraphHasCtxNode(graphs[fused_node_idx], ort_api, has_context_node));
+    if (has_context_node) {
       RETURN_IF_ERROR(ep->CreateNodeComputeInfoFromPrecompiledEngine(this_ptr, graphs[fused_node_idx], fused_node,
                                                                      input_map, output_map,
                                                                      &node_compute_infos_result[fused_node_idx]));
@@ -2790,6 +2837,7 @@ TensorrtExecutionProvider::TensorrtExecutionProvider(TensorrtExecutionProviderFa
   size_t num_entries = 0;
   ort_api.GetKeyValuePairs(key_value_pairs, &keys, &values, &num_entries);
 
+  ProviderOptions context_options;
   for (size_t i = 0; i < num_entries; ++i) {
     const char* key = keys[i];
 
@@ -2798,6 +2846,10 @@ TensorrtExecutionProvider::TensorrtExecutionProvider(TensorrtExecutionProviderFa
       std::string key_str = key;
       const char* value = values[i];
       provider_options[key_str.substr(key_prefix.size())] = value;
+    } else if (std::strcmp(key, "ep.context_enable") == 0 ||
+               std::strcmp(key, "ep.context_embed_mode") == 0 ||
+               std::strcmp(key, "ep.context_file_path") == 0) {
+      context_options[key] = values[i];
     }
   }
 
@@ -2807,6 +2859,25 @@ TensorrtExecutionProvider::TensorrtExecutionProvider(TensorrtExecutionProviderFa
   info_ = TensorrtExecutionProviderInfo::FromProviderOptions(provider_options);
   info_.has_trt_options = true;
   device_id_ = info_.device_id;
+
+  // Generic session settings override only the corresponding legacy TRT option.
+  if (auto it = context_options.find("ep.context_enable"); it != context_options.end()) {
+    ENFORCE(it->second == "0" || it->second == "1", "ep.context_enable must be 0 or 1");
+    info_.dump_ep_context_model = it->second == "1";
+  }
+  if (auto it = context_options.find("ep.context_embed_mode"); it != context_options.end()) {
+    ENFORCE(it->second == "0" || it->second == "1", "ep.context_embed_mode must be 0 or 1");
+    info_.ep_context_embed_mode = it->second == "1" ? 1 : 0;
+  }
+  ENFORCE(info_.ep_context_embed_mode == 0 || info_.ep_context_embed_mode == 1,
+          "trt_ep_context_embed_mode must be 0 or 1");
+  if (auto it = context_options.find("ep.context_file_path"); it != context_options.end()) {
+    info_.ep_context_file_path = it->second;
+  }
+
+  cudaDeviceProp device_properties;
+  CUDA_CALL_THROW(cudaGetDeviceProperties(&device_properties, device_id_));
+  compute_capability_ = GetComputeCapacity(device_properties);
 
   std::string profile_min_shapes, profile_max_shapes, profile_opt_shapes;
 
@@ -2954,18 +3025,8 @@ TensorrtExecutionProvider::TensorrtExecutionProvider(TensorrtExecutionProviderFa
   // The new cache path will be saved as the "ep_cache_context" node attritue of the EP context node.
   // For security reason, it needs to make sure the engine cache is saved inside context model directory.
   if (dump_ep_context_model_ && engine_cache_enable_) {
-    if (IsAbsolutePath(cache_path_)) {
-      std::string message = "In the case of dumping context model and for security purpose, the trt_engine_cache_path should be set with a relative path, but it is an absolute path:  " + cache_path_;
-      Ort::ThrowOnError(ort_api.Logger_LogMessage(&logger_,
-                                                  OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR,
-                                                  message.c_str(), ORT_FILE, __LINE__, __FUNCTION__));
-    }
-    if (IsRelativePathToParentPath(cache_path_)) {
-      std::string message = "In the case of dumping context model and for security purpose, The trt_engine_cache_path has '..', it's not allowed to point outside the directory.";
-      Ort::ThrowOnError(ort_api.Logger_LogMessage(&logger_,
-                                                  OrtLoggingLevel::ORT_LOGGING_LEVEL_ERROR,
-                                                  message.c_str(), ORT_FILE, __LINE__, __FUNCTION__));
-    }
+    ENFORCE(!IsAbsolutePath(cache_path_) && !IsRelativePathToParentPath(cache_path_),
+            "trt_engine_cache_path must remain relative to the EPContext model directory");
 
     // Engine cache relative path to context model directory.
     // It's used when dumping the "ep_cache_context" node attribute.

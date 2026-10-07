@@ -359,6 +359,7 @@ if(onnxruntime_ep_tensorrt_BUILD_TESTS)
     tests/cuda_graph_test.cc
     tests/tensorrt_basic_test.cc
     tests/tensorrt_dla_test.cc
+    tests/tensorrt_ep_context_test.cc
   )
   target_compile_definitions(trt_ep_tests PRIVATE
     -DONNX_NAMESPACE=onnx

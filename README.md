@@ -303,6 +303,36 @@ Provider options are passed as key-value string pairs when creating a session. T
 | `trt_engine_hw_compatible` | bool | `0` | Build HW-compatible engine. |
 | `trt_op_types_to_exclude` | string | `""` | Op types to exclude from TRT acceleration. |
 
+## EPContext Models
+
+GPU and DLA sessions can save compiled TensorRT engines in an EPContext model.
+Configure generation with the generic ORT session settings:
+
+```cpp
+session_options.AddConfigEntry("ep.context_enable", "1");
+session_options.AddConfigEntry("ep.context_embed_mode", "1");
+session_options.AddConfigEntry("ep.context_file_path", "deploy/model_ctx.onnx");
+```
+
+Create the output directory before creating the session. Mode `1` embeds the engine
+in the model. Mode `0` writes an external engine and records a path relative to the
+context model, preserving any `trt_engine_cache_path` subdirectory. Move the model
+and external engine directory together. Generation requires static input shapes
+or explicit TensorRT shape profiles.
+
+To reload, create a session from the saved model and select the same GPU or DLA
+EP device and provider options. Leave `ep.context_enable` disabled. When loading
+an external context from memory, set `ep.context_file_path` to its model location
+so the EP can resolve engine paths. Embedded contexts need no external engine cache.
+
+Generic settings override corresponding legacy `trt_dump_ep_context_model`,
+`trt_ep_context_embed_mode`, and `trt_ep_context_file_path` options. Unspecified
+settings retain the legacy values; the default embedding mode remains `0`.
+
+The `GpuAndDla/TensorrtContextTest.*` tests cover both storage modes, relocation,
+memory loading, cached-engine embedding, context metadata, and foreign EP ownership.
+DLA tests require ORT API 27 or later and an available DLA device.
+
 ## Building and Running Tests
 
 Unit tests cover basic inference, dynamic shapes, multi-threading, engine caching, EPContext models, CUDA graph capture/replay, and TRT plugin custom ops.
