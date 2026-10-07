@@ -259,6 +259,15 @@ device is available.
 
 ## Provider Options
 
+When built against TensorRT **11.4 or newer**, the EP uses strongly typed
+networks for both GPU and DLA. The legacy `trt_fp16_enable`, `trt_int8_enable`,
+and `trt_bf16_enable` options are accepted but ignored. If any is enabled, the
+EP logs a warning during session creation with the TensorRT build version and
+the disabled option names. Precision must be expressed through ONNX tensor
+types and explicit quantization; INT8 calibration tables and layer precision
+overrides are not used in these builds. This policy is selected from the SDK
+headers at compilation, including SDK variants with the same version number.
+
 Provider options are passed as key-value string pairs when creating a session. These are the same options supported by the legacy in-tree TensorRT EP.
 
 | Option | Type | Default | Description |

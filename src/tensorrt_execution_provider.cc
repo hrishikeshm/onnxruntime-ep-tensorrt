@@ -962,7 +962,7 @@ SubGraphCollection_t TensorrtExecutionProvider::GetSupportedList(SubGraphCollect
         TensorrtLogger& trt_logger = GetTensorrtLogger(detailed_build_log_, logger_, &ort_api);
         auto trt_builder = GetBuilder(trt_logger);
         auto network_flags = 0;
-#if NV_TENSORRT_VERSION >= 11
+#if defined(ORT_TENSORRT_STRONGLY_TYPED) || NV_TENSORRT_MAJOR >= 11
         network_flags |= 0;
 #elif NV_TENSORRT_MAJOR > 8
         network_flags |= (fp16_enable_ || int8_enable_ || bf16_enable_) ? 0 : 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kSTRONGLY_TYPED);
@@ -1403,7 +1403,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
   TensorrtLogger& trt_logger = GetTensorrtLogger(detailed_build_log_, logger_, &ort_api);
   auto trt_builder = GetBuilder(trt_logger);
   auto network_flags = 0;
-#if NV_TENSORRT_VERSION >= 11
+#if defined(ORT_TENSORRT_STRONGLY_TYPED) || NV_TENSORRT_MAJOR >= 11
   network_flags |= 0;
 #elif NV_TENSORRT_MAJOR > 8
   network_flags |= (fp16_enable_ || int8_enable_ || bf16_enable_) ? 0 : 1U << static_cast<uint32_t>(nvinfer1::NetworkDefinitionCreationFlag::kSTRONGLY_TYPED);
@@ -1432,7 +1432,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
   // Force Pow + Reduce ops in layer norm to run in FP32 to avoid overflow.
   // setPrecision/setOutputType are removed in TRT 11 (strongly-typed networks); fp16/bf16 are
   // forced false there, so this block only applies pre-11.
-#if NV_TENSORRT_MAJOR < 11
+#if !defined(ORT_TENSORRT_STRONGLY_TYPED) && NV_TENSORRT_MAJOR < 11
 #if defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable : 4996)
@@ -1608,7 +1608,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
   // platformHasFastFp16 was removed in TRT 11; no #else needed because TRT 11's
   // minimum GPU requirement (Volta, SM 7.0) exceeds the FP16 threshold (SM 5.3),
   // so the check would always return true on any TRT 11-capable device.
-#if NV_TENSORRT_MAJOR < 11
+#if !defined(ORT_TENSORRT_STRONGLY_TYPED) && NV_TENSORRT_MAJOR < 11
   if (fp16_enable_ || bf16_enable_) {
 #if defined(_MSC_VER)
 #pragma warning(push)
@@ -1631,7 +1631,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
   // platformHasFastInt8 was removed in TRT 11; no #else needed because TRT 11's
   // minimum GPU requirement (Volta, SM 7.0) exceeds the INT8 threshold (SM 6.1),
   // so the check would always return true on any TRT 11-capable device.
-#if NV_TENSORRT_MAJOR < 11
+#if !defined(ORT_TENSORRT_STRONGLY_TYPED) && NV_TENSORRT_MAJOR < 11
   if (int8_enable_) {
 #if defined(_MSC_VER)
 #pragma warning(push)
@@ -1652,12 +1652,14 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
 
   // Load INT8 calibration table
   std::unordered_map<std::string, float> dynamic_range_map;
+#if !defined(ORT_TENSORRT_STRONGLY_TYPED)
   if (int8_enable_ && int8_calibration_cache_available_) {
     const std::string calibration_cache_path = GetCachePath(cache_path_, int8_calibration_cache_name_);
     if (!ReadDynamicRange(calibration_cache_path, int8_use_native_tensorrt_calibration_table_, dynamic_range_map)) {
       throw std::runtime_error("Failed to read INT8 calibration table " + calibration_cache_path);
     }
   }
+#endif
 
   const char* name = nullptr;
   RETURN_IF_ERROR(ort_api.Node_GetName(fused_node, &name));
@@ -1667,7 +1669,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
   std::string trt_node_name_with_precision = fused_node_name;
   // TRT 11 removed the standalone precision builder flags; networks are strongly-typed and the
   // fp16/bf16/int8 enables are forced false at construction, so this block only applies pre-11.
-#if NV_TENSORRT_MAJOR < 11
+#if !defined(ORT_TENSORRT_STRONGLY_TYPED) && NV_TENSORRT_MAJOR < 11
 #if defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable : 4996)
@@ -1724,9 +1726,9 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
         }
         trt_config->setDefaultDeviceType(nvinfer1::DeviceType::kDLA);
         trt_config->setDLACore(dla_core_);
-#if NV_TENSORRT_MAJOR >= 11
-        // DLA + explicit-QDQ requires FP16 mode on the builder config; kFP16 is deprecated in
-        // TRT 11 but still functional and required here (setDLABackend asserts otherwise).
+#if NV_TENSORRT_MAJOR >= 11 && !defined(ORT_TENSORRT_STRONGLY_TYPED)
+        // Retain the DLA FP16 workaround for older TensorRT 11 builds only.
+        // TensorRT 11.4+ takes precision from the graph and removes this flag.
 #if defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable : 4996)
@@ -1968,7 +1970,7 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
         // platformHasFastInt8 and setInt8Calibrator (implicit quantization) were removed in TRT 11.
         // No #else needed: TRT 11's minimum GPU (Volta, SM 7.0) always has fast INT8 (SM 6.1+),
         // and explicit quantization via SetDynamicRange is used instead of setInt8Calibrator.
-#if NV_TENSORRT_MAJOR < 11
+#if !defined(ORT_TENSORRT_STRONGLY_TYPED) && NV_TENSORRT_MAJOR < 11
 #if defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable : 4996)
@@ -2893,6 +2895,7 @@ TensorrtExecutionProvider::TensorrtExecutionProvider(TensorrtExecutionProviderFa
     max_partition_iterations_ = info_.max_partition_iterations;
     min_subgraph_size_ = info_.min_subgraph_size;
     max_workspace_size_ = info_.max_workspace_size;
+#if !defined(ORT_TENSORRT_STRONGLY_TYPED)
     fp16_enable_ = info_.fp16_enable;
     int8_enable_ = info_.int8_enable;
     bf16_enable_ = info_.bf16_enable;
@@ -2900,6 +2903,7 @@ TensorrtExecutionProvider::TensorrtExecutionProvider(TensorrtExecutionProviderFa
       int8_calibration_cache_name_ = info_.int8_calibration_table_name;
       int8_use_native_tensorrt_calibration_table_ = info_.int8_use_native_calibration_table;
     }
+#endif
     if (info_.dla_enable) {  // TensorRT validates the model precision for DLA.
       dla_enable_ = info_.dla_enable;
       dla_core_ = info_.dla_core;
@@ -2948,9 +2952,11 @@ TensorrtExecutionProvider::TensorrtExecutionProvider(TensorrtExecutionProviderFa
     }
     force_sequential_engine_build_ = info_.force_sequential_engine_build;
     context_memory_sharing_enable_ = info_.context_memory_sharing_enable;
+#if !defined(ORT_TENSORRT_STRONGLY_TYPED)
     if (fp16_enable_ || bf16_enable_) {
       layer_norm_fp32_fallback_ = info_.layer_norm_fp32_fallback;
     }
+#endif
     build_heuristics_enable_ = info_.build_heuristics_enable;
     sparsity_enable_ = info_.sparsity_enable;
     builder_optimization_level_ = info_.builder_optimization_level;
@@ -2966,10 +2972,20 @@ TensorrtExecutionProvider::TensorrtExecutionProvider(TensorrtExecutionProviderFa
     // deprecate env provider option
   }
 
-  // In TRT 11.0 the standalone precision flags (FP16 / BF16 / INT8) were removed; networks are
-  // strongly-typed and precision is driven by the ONNX graph. Force the flags false so the rest of
-  // the EP does not emit the deprecated builder flags. DLA still re-asserts FP16 locally (see below).
-#if NV_TENSORRT_MAJOR >= 11
+  // Keep accepting legacy precision options for API compatibility. In a build
+  // against TensorRT 11.4+ they remain disabled, including for DLA; model tensor
+  // types and explicit quantization determine precision instead.
+#if defined(ORT_TENSORRT_STRONGLY_TYPED)
+  if (info_.fp16_enable || info_.bf16_enable || info_.int8_enable) {
+    const std::string message = "[TensorRT EP] Built with TensorRT " +
+        std::to_string(NV_TENSORRT_MAJOR) + "." + std::to_string(NV_TENSORRT_MINOR) + "." +
+        std::to_string(NV_TENSORRT_PATCH) + "." + std::to_string(NV_TENSORRT_BUILD) +
+        " (>= 11.4): trt_fp16_enable, trt_int8_enable, and trt_bf16_enable are disabled for this build and will be ignored. Precision must be expressed by the ONNX graph.";
+    Ort::ThrowOnError(ort_api.Logger_LogMessage(&logger_,
+                                                OrtLoggingLevel::ORT_LOGGING_LEVEL_WARNING,
+                                                message.c_str(), ORT_FILE, __LINE__, __FUNCTION__));
+  }
+#elif NV_TENSORRT_MAJOR >= 11
   if (fp16_enable_ || bf16_enable_ || int8_enable_) {
     std::string message = "[TensorRT EP] Compiled for TensorRT >= 11.0 - precision flags (BF16 / FP16 / INT8) have been removed and no longer have an effect. Strongly-typed will be used for all networks.";
     Ort::ThrowOnError(ort_api.Logger_LogMessage(&logger_,
@@ -3088,9 +3104,11 @@ TensorrtExecutionProvider::TensorrtExecutionProvider(TensorrtExecutionProviderFa
     }
   }
 
+#if !defined(ORT_TENSORRT_STRONGLY_TYPED)
   if (int8_enable_) {
     int8_calibration_cache_available_ = !int8_calibration_cache_name_.empty();
   }
+#endif
 
   /*
    * Parse explicit min/max/opt profile shapes from provider options.
@@ -3452,7 +3470,7 @@ OrtStatus* TRTEpNodeComputeInfo::ComputeImpl(OrtNodeComputeInfo* this_ptr, void*
     // platformHasFastInt8 and setInt8Calibrator (implicit quantization) were removed in TRT 11.
     // No #else needed: TRT 11's minimum GPU (Volta, SM 7.0) always has fast INT8 (SM 6.1+),
     // and explicit quantization via SetDynamicRange is used instead of setInt8Calibrator.
-#if NV_TENSORRT_MAJOR < 11
+#if !defined(ORT_TENSORRT_STRONGLY_TYPED) && NV_TENSORRT_MAJOR < 11
 #if defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable : 4996)
@@ -3471,7 +3489,7 @@ OrtStatus* TRTEpNodeComputeInfo::ComputeImpl(OrtNodeComputeInfo* this_ptr, void*
 #endif
     // Set precision flags. Removed in TRT 11 (strongly-typed networks); the enables are forced
     // false at construction, so this only applies pre-11.
-#if NV_TENSORRT_MAJOR < 11
+#if !defined(ORT_TENSORRT_STRONGLY_TYPED) && NV_TENSORRT_MAJOR < 11
 #if defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable : 4996)
@@ -3517,8 +3535,8 @@ OrtStatus* TRTEpNodeComputeInfo::ComputeImpl(OrtNodeComputeInfo* this_ptr, void*
       }
       trt_config->setDefaultDeviceType(nvinfer1::DeviceType::kDLA);
       trt_config->setDLACore(trt_state->dla_core);
-#if NV_TENSORRT_MAJOR >= 11
-      // DLA + explicit-QDQ requires FP16 mode (kFP16 deprecated but functional).
+#if NV_TENSORRT_MAJOR >= 11 && !defined(ORT_TENSORRT_STRONGLY_TYPED)
+      // Match the initial build: strongly typed builds do not set precision flags.
 #if defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable : 4996)

@@ -258,6 +258,9 @@ struct PriorityNodeCompare {
   }
 };
 
+#if !defined(ORT_TENSORRT_STRONGLY_TYPED) && NV_TENSORRT_MAJOR < 11
+// Legacy calibration ranges are used only by the pre-11 INT8 build paths.
+// TensorRT 11 strongly typed SDKs remove ITensor::setDynamicRange.
 bool SetDynamicRange(nvinfer1::INetworkDefinition& network, std::unordered_map<std::string, float>& dynamic_range_map) {
   // Set dynamic range for input tensors
   for (int i = 0; i < network.getNbInputs(); ++i) {
@@ -347,6 +350,7 @@ bool SetDynamicRange(nvinfer1::INetworkDefinition& network, std::unordered_map<s
   }
   return true;
 }
+#endif
 
 std::vector<std::string> SplitToStringVec(std::string const& s, char separator) {
   std::vector<std::string> splitted;
