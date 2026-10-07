@@ -2,6 +2,7 @@
 #include "tensorrt_execution_provider.h"
 #include "tensorrt_execution_provider_kernel_registration.h"
 #include "cuda_allocator.h"
+#include "windows_dependency_loader.h"
 
 #include <gsl/gsl>
 #include <cassert>
@@ -543,6 +544,9 @@ EXPORT_SYMBOL OrtStatus* CreateEpFactories(const char* registration_name, const 
 
   try {
     int cuda_device_count = 0;
+    // Resolve delay-linked TensorRT DLLs before any TensorRT entry point,
+    // including the optional test-harness builder created below.
+    trt_ep::EnsureTensorRtDependenciesLoaded();
     const cudaError_t cuda_err = cudaGetDeviceCount(&cuda_device_count);
     if (cuda_err != cudaSuccess) {
       // CUDA API failure (e.g., driver not loaded, version mismatch) is a hard error.

@@ -74,6 +74,23 @@ cmake --build ./ --config Release
 | `onnxruntime_ep_tensorrt_BUILD_TESTS` | `OFF` | Build unit tests (requires GTest, fetched automatically). |
 | `onnxruntime_ep_tensorrt_OBJECT_CACHE` | `ON` | Use sccache/ccache if available. |
 
+### Windows Runtime Deployment
+
+On Windows, the build and install steps stage the TensorRT runtime DLLs next
+to `onnxruntime_ep_tensorrt.dll`. Deploy that complete directory. The EP loads
+dependencies from its own directory first, so the executable can reside
+elsewhere and no TensorRT `PATH` entry is required for a complete package.
+If a DLL is absent, the loader falls back to the normal Windows search path.
+An existing DLL that fails to load reports the attempted path and Windows error.
+
+Windows ARM64 DLA also requires `nvdla_compiler.dll` from the selected TensorRT
+SDK and `cudla.dll` from the matching DTK EP package. Set
+`-DCUDLA_DLL_PATH=/path/to/NV_TENSORRT_ARM64_EP_PACKAGE/cudla.dll` to stage cuDLA;
+CMake also checks standard sibling package layouts. Missing cuDLA produces a
+configuration warning, and a DLA session fails if the runtime cannot be loaded.
+The compiler and cuDLA are preloaded only for DLA sessions. DLA transform DLLs
+are not included.
+
 ## Usage
 
 The plugin EP follows the ORT EP plugin ABI workflow:

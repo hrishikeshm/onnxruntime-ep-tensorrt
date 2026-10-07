@@ -17,6 +17,7 @@
 #include "onnx/onnx_pb.h"
 #include "cuda/unary_elementwise_ops_impl.h"
 #include "utils/ep_utils.h"
+#include "windows_dependency_loader.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -2816,6 +2817,13 @@ TensorrtExecutionProvider::TensorrtExecutionProvider(TensorrtExecutionProviderFa
       dla_gpu_fallback_enable_ = info_.dla_gpu_fallback_enable;
       dla_enable_uint8_asymmetric_quantization_ = info_.dla_enable_uint8_asymmetric_quantization;
       dla_adjust_for_dla_ = info_.dla_adjust_for_dla;
+    }
+    if (dla_enable_) {
+      // TensorRT loads its DLA compiler by filename later. Load the compiler
+      // and cuDLA runtime from beside the EP now, with Windows error details
+      // if either dependency cannot be loaded. These are no-ops on Linux.
+      EnsureDlaCompilerDependencyLoaded();
+      EnsureCuDlaDependencyLoaded();
     }
     dump_subgraphs_ = info_.dump_subgraphs;
     engine_cache_enable_ = info_.engine_cache_enable;
