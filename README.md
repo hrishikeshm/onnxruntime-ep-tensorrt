@@ -219,6 +219,44 @@ onnxruntime_perf_test \
   -r 1 path/to/model.onnx
 ```
 
+## DLA Device Selection
+
+DLA requires an ONNX Runtime SDK and runtime exposing **ORT API 27 or later**.
+Set `ORT_HOME` to that SDK when building; the default ORT 1.25 package supports
+GPU execution only. Build against the SDK matching the runtime you deploy.
+The platform must expose an NVIDIA NPU device (ACPI vendor `NVDA`) through ORT
+hardware discovery and a single CUDA-visible GPU. ORT does not need to report
+that GPU as a hardware device: DLA resolves CUDA ordinal `0` directly and caches
+its memory info independently of the GPU device cache. Ambiguous NPU-to-GPU
+associations on multi-GPU systems are not supported.
+
+Select the DLA `OrtEpDevice` explicitly when appending the provider:
+
+```cpp
+std::vector<Ort::ConstEpDevice> dla_devices;
+for (const auto& device : env.GetEpDevices()) {
+  if (std::string(device.EpName()) == "TRTPluginEP" &&
+      device.Device().Type() == OrtHardwareDeviceType_NPU) {
+    dla_devices.push_back(device);
+    break;
+  }
+}
+// Require one selected DLA device before appending the provider.
+session_options.AppendExecutionProvider_V2(env, dla_devices,
+                                          {{"trt_fp16_enable", "1"}, {"trt_dla_core", "0"}});
+```
+
+The DLA device supplies `trt_dla_enable=1` and its associated CUDA `device_id`
+as defaults. Explicit overrides must agree with the selected device. DLA uses
+raw `cudaMallocHost` allocation for NPU `HOST_ACCESSIBLE` tensors; no EP arena
+is enabled. GPU devices retain their existing raw CUDA allocator.
+
+Models must be supported by TensorRT's DLA backend. External DLA graph
+transforms are not integrated. CUDA graph capture is rejected for DLA sessions.
+The `TensorrtDlaTest.*` tests cover discovery, pinned allocations, repeated
+inference, and invalid options. They require DLA hardware and skip when no DLA
+device is available.
+
 ## Provider Options
 
 Provider options are passed as key-value string pairs when creating a session. These are the same options supported by the legacy in-tree TensorRT EP.

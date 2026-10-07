@@ -29,10 +29,21 @@ bool ORT_API_CALL TRTEpDataTransfer::CanCopyImpl(const OrtDataTransferImpl* this
     return false;
   }
 
-  // copy must be GPU to GPU or between GPU and CPU
+  // DLA uses pinned host memory, identified by the NVIDIA NPU vendor and
+  // HOST_ACCESSIBLE memory type. Never claim transfers for foreign NPUs.
+  const bool src_is_dla = src_type == OrtMemoryInfoDeviceType_NPU;
+  const bool dst_is_dla = dst_type == OrtMemoryInfoDeviceType_NPU;
+  if ((src_is_dla && (src_vendor_id != kNvidiaNpuVendorId ||
+                     impl.ep_api.MemoryDevice_GetMemoryType(src_memory_device) != OrtDeviceMemoryType_HOST_ACCESSIBLE)) ||
+      (dst_is_dla && (dst_vendor_id != kNvidiaNpuVendorId ||
+                     impl.ep_api.MemoryDevice_GetMemoryType(dst_memory_device) != OrtDeviceMemoryType_HOST_ACCESSIBLE))) {
+    return false;
+  }
+
   return (src_type == OrtMemoryInfoDeviceType_GPU && dst_type == OrtMemoryInfoDeviceType_GPU) ||
          (src_type == OrtMemoryInfoDeviceType_GPU && dst_type == OrtMemoryInfoDeviceType_CPU) ||
-         (src_type == OrtMemoryInfoDeviceType_CPU && dst_type == OrtMemoryInfoDeviceType_GPU);
+         (src_type == OrtMemoryInfoDeviceType_CPU && dst_type == OrtMemoryInfoDeviceType_GPU) ||
+         src_is_dla || dst_is_dla;
 }
 
 // function to copy one or more tensors.
@@ -96,7 +107,7 @@ OrtStatus* ORT_API_CALL TRTEpDataTransfer::CopyTensorsImpl(OrtDataTransferImpl* 
       // GPU -> CPU, this is blocking
       CUDA_RETURN_IF_ERROR(cudaMemcpy(dst_data, src_data, bytes, cudaMemcpyDeviceToHost));
     } else {
-      // CPU -> CPU involves copy to/from pinned memory and a synchronize may be required first
+      // CPU <-> DLA and DLA <-> DLA use pinned host memory and a host memcpy.
       // ORT_ENFORCE(dst_data != src_data);
       memcpy(dst_data, src_data, bytes);
     }

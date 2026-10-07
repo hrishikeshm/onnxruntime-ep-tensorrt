@@ -534,6 +534,16 @@ OrtStatusPtr ApplyProfileShapesFromInputTensorValue(std::vector<nvinfer1::IOptim
     break;                                                                                                                                        \
   }
 
+// Clear an existing cuDLA registration before replacing its tensor address.
+static bool SetTensorAddressDla(nvinfer1::IExecutionContext* ctx, const char* name, void* data) {
+  const void* prev = ctx->getTensorAddress(name);
+  if (prev != data) {
+    if (prev != nullptr && !ctx->setTensorAddress(name, nullptr)) return false;
+    return ctx->setTensorAddress(name, data);
+  }
+  return true;
+}
+
 OrtStatusPtr BindContextInput(Ort::KernelContext& ctx,
                               nvinfer1::ICudaEngine* trt_engine,
                               nvinfer1::IExecutionContext* trt_context,
@@ -543,7 +553,7 @@ OrtStatusPtr BindContextInput(Ort::KernelContext& ctx,
                               std::unordered_map<std::string, std::vector<int64_t>>& shape_tensor_values_int64,
                               std::vector<AllocatorUniquePtr<void>>& scratch_buffers,
                               OrtAllocator* alloc,
-                              cudaStream_t stream) {
+                              cudaStream_t stream, bool dla_enable) {
   try {
     auto input_tensor = ctx.GetInput(input_index);
     auto tensor_info = input_tensor.GetTensorTypeAndShapeInfo();
@@ -649,7 +659,9 @@ OrtStatusPtr BindContextInput(Ort::KernelContext& ctx,
           return g_ort_api->CreateStatus(ORT_EP_FAIL, std::string("TensorRT EP input onnx tensor data type: " + std::to_string(tensor_type) + " not supported.").c_str());
         }
       }
-      trt_context->setTensorAddress(input_name, data);
+      const bool bound = dla_enable ? SetTensorAddressDla(trt_context, input_name, data)
+                                    : trt_context->setTensorAddress(input_name, data);
+      if (!bound) return Ort::GetApi().CreateStatus(ORT_EP_FAIL, "Failed to bind TensorRT input tensor address");
     }
   } catch (const Ort::Exception& e) {
     return g_ort_api->CreateStatus(ORT_EP_FAIL, e.what());
@@ -668,7 +680,7 @@ OrtStatusPtr BindContextOutput(Ort::KernelContext& ctx,
                                DDSOutputAllocatorMap& dds_output_allocator_map,
                                std::vector<AllocatorUniquePtr<void>>& scratch_buffers,
                                OrtAllocator* alloc,
-                               std::unordered_map<char const*, void*>& buffers) {
+                               std::unordered_map<char const*, void*>& buffers, bool dla_enable) {
   // Get output shape
   nvinfer1::Dims dims = trt_context->getTensorShape(output_name);
   int nb_dims = dims.nbDims;
@@ -722,7 +734,9 @@ OrtStatusPtr BindContextOutput(Ort::KernelContext& ctx,
           return g_ort_api->CreateStatus(ORT_EP_FAIL, std::string("TensorRT EP output tensor data type: " + std::to_string(output_type) + " not supported.").c_str());
         }
       }
-      trt_context->setTensorAddress(output_name, buffers[output_name]);
+      const bool bound = dla_enable ? SetTensorAddressDla(trt_context, output_name, buffers[output_name])
+                                    : trt_context->setTensorAddress(output_name, buffers[output_name]);
+      if (!bound) return Ort::GetApi().CreateStatus(ORT_EP_FAIL, "Failed to bind TensorRT output tensor address");
     } catch (const Ort::Exception& e) {
       return g_ort_api->CreateStatus(ORT_EP_FAIL, e.what());
     }
@@ -1016,6 +1030,21 @@ SubGraphCollection_t TensorrtExecutionProvider::GetSupportedList(SubGraphCollect
   }
   return nodes_list_output;
 }
+
+#if ORT_API_VERSION >= 27
+OrtStatus* ORT_API_CALL TensorrtExecutionProvider::GetDefaultMemoryDeviceImpl(
+    const OrtEp* this_ptr, const OrtMemoryDevice** device) noexcept {
+  const auto& ep = *static_cast<const TensorrtExecutionProvider*>(this_ptr);
+  *device = nullptr;
+  if (ep.dla_enable_) {
+    // ORT must allocate DLA tensors from cudaMallocHost, not pageable CPU memory.
+    const auto* info = ep.factory_.GetMemoryInfoByOrdinal(ep.device_id_, false, true);
+    if (!info) return ep.ort_api.CreateStatus(ORT_EP_FAIL, "DLA memory device is not registered");
+    *device = ep.ep_api.MemoryInfo_GetMemoryDevice(info);
+  }
+  return nullptr;
+}
+#endif
 
 OrtStatus* ORT_API_CALL TensorrtExecutionProvider::GetCapabilityImpl(OrtEp* this_ptr, const OrtGraph* graph,
                                                                      OrtEpGraphSupportInfo* graph_support_info) noexcept {
@@ -1646,22 +1675,9 @@ OrtStatus* TensorrtExecutionProvider::CreateNodeComputeInfoFromGraph(OrtEp* this
 #endif
     if (dla_enable_ && dla_core_ >= 0) {  // DLA can only run with FP16 and INT8
       int number_of_dla_core = trt_builder->getNbDLACores();
-      if (number_of_dla_core == 0) {
-        std::string message = "[TensorRT EP] Try to use DLA core, but platform doesn't have any DLA core";
-        Ort::ThrowOnError(ep->ort_api.Logger_LogMessage(&ep->logger_,
-                                                        OrtLoggingLevel::ORT_LOGGING_LEVEL_WARNING,
-                                                        message.c_str(), ORT_FILE, __LINE__, __FUNCTION__));
-        dla_enable_ = false;
+      if (number_of_dla_core <= 0 || dla_core_ >= number_of_dla_core) {
+        return ort_api.CreateStatus(ORT_INVALID_ARGUMENT, "Requested DLA core is not available");
       } else {
-        if (dla_core_ >= number_of_dla_core) {
-          std::string message = "[TensorRT EP] Try to use DLA core #" + std::to_string(dla_core_) +
-                                std::string(", but it exceeds platform's maximum DLA core number ") + std::to_string(number_of_dla_core) +
-                                std::string(". Use DLA core 0 instead.");
-          Ort::ThrowOnError(ep->ort_api.Logger_LogMessage(&ep->logger_,
-                                                          OrtLoggingLevel::ORT_LOGGING_LEVEL_WARNING,
-                                                          message.c_str(), ORT_FILE, __LINE__, __FUNCTION__));
-          dla_core_ = 0;
-        }
         std::string message = "[TensorRT EP] use DLA core " + std::to_string(dla_core_);
         Ort::ThrowOnError(ep->ort_api.Logger_LogMessage(&ep->logger_,
                                                         OrtLoggingLevel::ORT_LOGGING_LEVEL_VERBOSE,
@@ -2735,6 +2751,9 @@ TensorrtExecutionProvider::TensorrtExecutionProvider(TensorrtExecutionProviderFa
   ReleaseNodeComputeInfos = ReleaseNodeComputeInfosImpl;
   CreateSyncStreamForDevice = CreateSyncStreamForDeviceImpl;
   GetKernelRegistry = GetKernelRegistryImpl;
+#if ORT_API_VERSION >= 27
+  GetDefaultMemoryDevice = GetDefaultMemoryDeviceImpl;
+#endif
 
   // Initialize the execution provider.
 
@@ -2810,7 +2829,7 @@ TensorrtExecutionProvider::TensorrtExecutionProvider(TensorrtExecutionProviderFa
       int8_calibration_cache_name_ = info_.int8_calibration_table_name;
       int8_use_native_tensorrt_calibration_table_ = info_.int8_use_native_calibration_table;
     }
-    if (fp16_enable_ || int8_enable_) {  // DLA can only be enabled with FP16 or INT8
+    if (info_.dla_enable) {  // TensorRT validates the model precision for DLA.
       dla_enable_ = info_.dla_enable;
       dla_core_ = info_.dla_core;
       dla_mem_pool_limit_ = info_.dla_mem_pool_limit;
@@ -3079,7 +3098,8 @@ TensorrtExecutionProvider::TensorrtExecutionProvider(TensorrtExecutionProviderFa
   // external stream:
   // If user provides "external" cuda stream, only this cuda stream will be used even if multiple threads are running InferenceSession.Run() concurrently.
   // So, no need to synchronize different streams after enqueueV3.
-  if (cuda_graph_enable_ || external_stream_) {
+  // DLA must complete before its tensor addresses are unregistered at run end.
+  if (!dla_enable_ && (cuda_graph_enable_ || external_stream_)) {
     sync_stream_after_enqueue_ = false;
   }
 
@@ -3203,7 +3223,7 @@ OrtStatus* TRTEpNodeComputeInfo::ComputeImpl(OrtNodeComputeInfo* this_ptr, void*
   auto& dds_output_allocator_map = dds_output_allocator_maps[fused_node_name];
 
   // Get default OrtMemoryInfo from factory's device cache
-  const OrtMemoryInfo* mem_info = ep.factory_.GetMemoryInfoByOrdinal(device_id, /* is pinned */ false);
+  const OrtMemoryInfo* mem_info = ep.factory_.GetMemoryInfoByOrdinal(device_id, /* is_pinned */ false, trt_state->dla_enable);
   if (mem_info == nullptr) {
     std::string err_msg = "TensorRT EP failed to get OrtMemoryInfo for device_id " + std::to_string(device_id) + " from provider factory.";
     return ep.ort_api.CreateStatus(ORT_EP_FAIL, err_msg.c_str());
@@ -3733,7 +3753,7 @@ OrtStatus* TRTEpNodeComputeInfo::ComputeImpl(OrtNodeComputeInfo* this_ptr, void*
     const auto tensor_shapes = tensor_info.GetShape();
 
     auto status = BindContextInput(ctx, trt_engine, trt_context, input_name, input_index, shape_tensor_values,
-                                   shape_tensor_values_int64, scratch_buffers, alloc, stream);
+                                   shape_tensor_values_int64, scratch_buffers, alloc, stream, trt_state->dla_enable);
     if (status != nullptr) {
       return ep.ort_api.CreateStatus(ORT_EP_FAIL, "BindContextInput failed.");
     }
@@ -3766,7 +3786,7 @@ OrtStatus* TRTEpNodeComputeInfo::ComputeImpl(OrtNodeComputeInfo* this_ptr, void*
     }
 
     auto status = BindContextOutput(ctx, trt_context, output_name, output_index, output_type, i, output_tensors,
-                                    output_dim_sizes, dds_output_allocator_map, scratch_buffers, alloc, buffers);
+                                    output_dim_sizes, dds_output_allocator_map, scratch_buffers, alloc, buffers, trt_state->dla_enable);
     if (status != nullptr) {
       return ep.ort_api.CreateStatus(ORT_EP_FAIL, "BindContextOutput failed.");
     }
@@ -3977,7 +3997,7 @@ OrtStatus* TRTEpEpContextNodeComputeInfo::ComputeImpl(OrtNodeComputeInfo* this_p
   std::unordered_map<std::string, std::vector<int64_t>> shape_tensor_values_int64;  // same as above but for int64 shape tensor input
 
   // Get default OrtMemoryInfo from factory's device cache
-  const OrtMemoryInfo* mem_info = ep.factory_.GetMemoryInfoByOrdinal(device_id, /* is pinned */ false);
+  const OrtMemoryInfo* mem_info = ep.factory_.GetMemoryInfoByOrdinal(device_id, /* is_pinned */ false, trt_state->dla_enable);
   if (mem_info == nullptr) {
     std::string err_msg = "TensorRT EP failed to get OrtMemoryInfo for device_id " + std::to_string(device_id) + " from provider factory.";
     return ep.ort_api.CreateStatus(ORT_EP_FAIL, err_msg.c_str());
@@ -4031,7 +4051,7 @@ OrtStatus* TRTEpEpContextNodeComputeInfo::ComputeImpl(OrtNodeComputeInfo* this_p
     const auto tensor_shapes = tensor_info.GetShape();
 
     auto status = BindContextInput(ctx, trt_engine, trt_context, input_name, input_index, shape_tensor_values,
-                                   shape_tensor_values_int64, scratch_buffers, alloc, stream);
+                                   shape_tensor_values_int64, scratch_buffers, alloc, stream, trt_state->dla_enable);
     if (status != nullptr) {
       return ep.ort_api.CreateStatus(ORT_EP_FAIL, "BindContextInput failed.");
     }
@@ -4064,7 +4084,7 @@ OrtStatus* TRTEpEpContextNodeComputeInfo::ComputeImpl(OrtNodeComputeInfo* this_p
     }
 
     auto status = BindContextOutput(ctx, trt_context, output_name, output_index, output_type, i, output_tensors,
-                                    output_dim_sizes, dds_output_allocator_map, scratch_buffers, alloc, buffers);
+                                    output_dim_sizes, dds_output_allocator_map, scratch_buffers, alloc, buffers, trt_state->dla_enable);
     if (status != nullptr) {
       return ep.ort_api.CreateStatus(ORT_EP_FAIL, "BindContextOutput failed.");
     }
